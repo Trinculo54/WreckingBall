@@ -1295,8 +1295,11 @@ void look_factors(int /*want*/, int got, float* lenK, float* thickK) {
         while (*r && *r != ',') ++r;
     }
 }
-// the first look whose model is loaded (the preferred one first), or the preferred one
-LogCandidate pick_look(uint8_t* table, LogCandidate want) {
+// the first look whose model is loaded (the preferred one first), or the preferred one.
+// *loaded says whether the one returned is loaded: where none is (Storm Island has no apple
+// or olive trees), the game would draw its grey stand-in box, stretched to log size.
+LogCandidate pick_look(uint8_t* table, LogCandidate want, bool* loaded = nullptr) {
+    if (loaded) *loaded = true;
     if (want.def == 0xFFFF || !g_loadedLooks) return want;
     if (model_resident(o_defModel(table, ((uint32_t)want.piece << 16) | want.def))) return want;
     for (int k = 0; k < g_nLookAlts; ++k) {
@@ -1305,6 +1308,7 @@ LogCandidate pick_look(uint8_t* table, LogCandidate want) {
         if (!whole || !readable(whole, 0xA0) || c.piece >= *reinterpret_cast<uint32_t*>(whole + 0x94)) continue;
         if (model_resident(o_defModel(table, ((uint32_t)c.piece << 16) | c.def))) return c;
     }
+    if (loaded) *loaded = false;
     return want;
 }
 std::atomic<int> g_lookSwaps{0};
@@ -1419,6 +1423,18 @@ void spawn_log(const PendingLog& p) {
     if (p.c.piece != 0xFFFF && p.c.piece >= *reinterpret_cast<uint32_t*>(whole + 0x94)) {
         dlogf("log %d: definition %u has no piece %u", p.n, p.c.def, p.c.piece);
         return;
+    }
+    // nothing loaded here to draw it with: no log (or falling pole) rather than a stand-in box
+    if (g_loadedLooks) {
+        bool loaded = true;
+        if (p.pole) pick_look(table, g_poleLook, &loaded);
+        else if (g_logModel.def != 0xFFFF) pick_look(table, g_logModel, &loaded);
+        else loaded = model_resident(o_defModel(table, id));
+        if (!loaded) {
+            static std::atomic<int> nn{0};
+            if (++nn <= 10) logf("%s %d: no model to draw it with is loaded here; left out", p.pole ? "pole" : "log", p.n);
+            return;
+        }
     }
     // free slot: the set at mgr+0x508 (value at node+0x1C), else recycle the farthest loose piece
     int slot;
@@ -1585,8 +1601,13 @@ void d_breakPieces(uint8_t* mgr, uint8_t* obj) {
                     break;
                 }
                 if (!swapped) {
+                    // break as a definition without pieces (the flattening bush), so the game doesn't
+                    // draw its stand-in box for each piece
+                    keep = id;
+                    *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (uint32_t)(g_bushDef > 0 ? g_bushDef : 110);
+                    swapped = true;
                     static int none = 0;
-                    if (none++ < 10) logf("tree pieces: no tree's pieces are loaded here; they won't be visible");
+                    if (none++ < 10) logf("tree pieces: no tree's pieces are loaded here; the tree breaks without them");
                 }
             }
         }

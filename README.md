@@ -79,7 +79,7 @@ Delete `fh2-mods\WreckingBall.dll` and `fh2-mods\WreckingBall.ini`. The next tim
 
 - **Fence debris colour:** pieces of painted fences come out in the game's plain metal colour.
 - **Telephone wires:** when a pole falls, its wires stay hanging. The game draws a whole run of wire as one object, so a single span can't be taken down.
-- **Log and branch models:** the game only loads a model's 3D data near where it uses it, and its breakable apple tree only appears near the orchards. Elsewhere, broken trees use the olive tree's pieces and logs use the olive trunk, sized to match. In the rare spot where neither is loaded, the pieces can't be drawn.
+- **Log and branch models:** the game only loads a model's 3D data near where it uses it, and its breakable apple tree only appears near the orchards. Elsewhere, broken trees use the olive tree's pieces and logs use the olive trunk, sized to match. Where neither is loaded, like on Storm Island, trees break without pieces and don't throw a log.
 - **Game version:** WreckingBall is written for the 24 November 2015 build of Forza Horizon 2 that Azimuth runs. On anything else it checks the game code first and turns itself off instead of patching the wrong place.
 
 ## How it works
