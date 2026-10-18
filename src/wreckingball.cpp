@@ -721,18 +721,18 @@ bool is_tree_provider(uint8_t* prov, const char** name) {
     return true;
 }
 
+// (functions with __try can't hold objects that need unwinding, so the locking is done in helpers)
+bool is_barrier_data(uint8_t* data) {
+    std::lock_guard<std::mutex> l(g_barrierLock);
+    return data && g_barrierData.count(data);
+}
 void d_cellAdd(uint8_t* mgr, uint8_t* msg) {
     __try {
         uint8_t* prov    = *reinterpret_cast<uint8_t**>(msg + 0x60);
         const char* name = "";
         if (prov && *reinterpret_cast<uintptr_t*>(prov) == g_base + RVA_MODELS_VTABLE) {
             uint8_t* data = *reinterpret_cast<uint8_t**>(prov + 0xF8);
-            bool barrier;
-            {
-                std::lock_guard<std::mutex> l(g_barrierLock);
-                barrier = data && g_barrierData.count(data);
-            }
-            if (barrier) mark_barrier_proc(*reinterpret_cast<int32_t*>(prov + 0x58));
+            if (is_barrier_data(data)) mark_barrier_proc(*reinterpret_cast<int32_t*>(prov + 0x58));
         }
         if (is_tree_provider(prov, &name)) {
             mark_tree_proc(*reinterpret_cast<int32_t*>(prov + 0x58));
@@ -862,6 +862,11 @@ bool contains_ci(const char* s, const char* needle) {
 using HolderLoadFn = void (*)(uint8_t* holder);
 HolderLoadFn o_holderLoad = nullptr;
 
+void note_template(const char* name, int isProc) {
+    std::lock_guard<std::mutex> l(g_seenLock);
+    if (g_tplNamesLogged.size() < 80 && g_tplNamesLogged.insert(name).second)
+        dlogf("collision template: %s%s", name, isProc ? "  <-- procedural physics" : "");
+}
 void d_holderLoad(uint8_t* holder) {
     o_holderLoad(holder);
     __try {
@@ -877,9 +882,7 @@ void d_holderLoad(uint8_t* holder) {
         }
         tpl_store(tpl, res, isProc);
         if (isProc) ++g_procTemplates;
-        std::lock_guard<std::mutex> l(g_seenLock);
-        if (g_tplNamesLogged.size() < 80 && g_tplNamesLogged.insert(name).second)
-            dlogf("collision template: %s%s", name, isProc ? "  <-- procedural physics" : "");
+        note_template(name, isProc);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
@@ -1330,6 +1333,17 @@ float log_length_for(float size) {
     return len;
 }
 
+void push_pending(const PendingLog& p) {
+    std::lock_guard<std::mutex> l(g_pendLock);
+    if (g_nPend < 16) g_pend[g_nPend++] = p;
+}
+int take_pending(PendingLog* out) {
+    std::lock_guard<std::mutex> l(g_pendLock);
+    int n = g_nPend;
+    std::memcpy(out, g_pend, sizeof(PendingLog) * n);
+    g_nPend = 0;
+    return n;
+}
 void queue_log(uint8_t* obj, float x, float y, float z, const float* carVel, float size) {
     if (!g_logs || !g_nLogCands) return;
     int n = g_logCycle ? g_logNext.fetch_add(1) : 0;
@@ -2024,13 +2038,18 @@ void learn_tri_convention(uint8_t** tris, uint8_t** verts, int n) {
     }
 }
 
+void learn_locked(uint8_t** tris, uint8_t** verts, int n) {
+    static std::mutex lm;
+    std::lock_guard<std::mutex> l(lm);
+    learn_tri_convention(tris, verts, n);
+}
 using GetPolysFn = int (*)(void* world, const float* box, int max, uint8_t** tris, uint8_t** verts, uint8_t flags);
 GetPolysFn o_getPolys = nullptr;
 int d_getPolys(void* world, const float* box, int max, uint8_t** tris, uint8_t** verts, uint8_t flags) {
     int n = o_getPolys(world, box, max, tris, verts, flags);
     __try {
         int conv = g_triConv.load(std::memory_order_relaxed);
-        if (conv == 0 && n > 0) { static std::mutex lm; std::lock_guard<std::mutex> l(lm); learn_tri_convention(tris, verts, n); }
+        if (conv == 0 && n > 0) learn_locked(tris, verts, n);
         if (conv != 1) return n;
         SolidPole* arr = g_solids.load(std::memory_order_acquire);
         int ns = g_nSolids.load(std::memory_order_acquire);
@@ -2128,10 +2147,7 @@ void break_pole(uint8_t* mgr, Pole& pl, const float* vel) {
     p.n = 10000 + g_polesBroken.load();
     p.pole = true; p.length = g_poleLength; p.thick = g_poleThick; p.tilt = 6.0f; p.spin = 1.4f; p.speedK = 0.25f; p.up = 0.3f;
     p.height = g_poleHeight;
-    {
-        std::lock_guard<std::mutex> l(g_pendLock);
-        if (g_nPend < 16) g_pend[g_nPend++] = p;
-    }
+    push_pending(p);
     // speed loss on the player's car (known from its last smash), and some wood flying
     if (uint8_t* dyn = g_lastCarDyn.load()) {
         __try {
@@ -2319,13 +2335,7 @@ void d_mgrUpdate(uint8_t* mgr, float a, float b) {
     }
     if (!g_nPend) return;
     PendingLog local[16];
-    int n;
-    {
-        std::lock_guard<std::mutex> l(g_pendLock);
-        n = g_nPend;
-        std::memcpy(local, g_pend, sizeof(PendingLog) * n);
-        g_nPend = 0;
-    }
+    int n = take_pending(local);
     for (int i = 0; i < n; ++i) {
         if (local[i].mgr != mgr) continue;
         __try {
@@ -2337,6 +2347,15 @@ void d_mgrUpdate(uint8_t* mgr, float a, float b) {
     }
 }
 
+void add_broken(float x, float y, float z) {
+    std::lock_guard<std::mutex> l(g_brokenLock);
+    int i = g_nBroken.load();
+    if (i < MAX_BROKEN) {
+        g_broken[i] = Broken{x, y, z};
+        trunk_add(x, y, z);
+        g_nBroken.store(i + 1, std::memory_order_release);
+    }
+}
 using OnCollisionFn = void (*)(uint8_t* obj, void* contact);
 OnCollisionFn o_onCollision = nullptr;
 
@@ -2390,13 +2409,7 @@ void d_onCollision(uint8_t* obj, void* contact) {
                      *reinterpret_cast<int32_t*>(obj + 0x124), proc, *reinterpret_cast<int32_t*>(obj + 0xC4), x, y, z, bm, am, k);
         }
         if (before == 0 && after != 0 && is_tree_proc(proc)) {
-            std::lock_guard<std::mutex> l(g_brokenLock);
-            int i = g_nBroken.load();
-            if (i < MAX_BROKEN) {
-                g_broken[i] = Broken{x, y, z};
-                trunk_add(x, y, z);
-                g_nBroken.store(i + 1, std::memory_order_release);
-            }
+            add_broken(x, y, z);
             // size of this tree, from its definition copy
             uint32_t lo = (uint32_t)*reinterpret_cast<int32_t*>(obj + 0x124) & 0xFFFF;
             float size  = (lo >= (uint32_t)CLONE_BASE && lo < (uint32_t)(CLONE_BASE + NUM_TIERS)) ? tier_size((int)(lo - CLONE_BASE)) : 1.0f;
@@ -2428,7 +2441,7 @@ void d_onCollision(uint8_t* obj, void* contact) {
                     if (*reinterpret_cast<uintptr_t*>(d) == g_base + RVA_DESTRUCTION_VTABLE)
                         dlogf("Wreckage RetriggerDelay is now %.2f", *reinterpret_cast<float*>(d + 0x24));
             dlogf("tree broke: size %.2f proc=%d child=%d state %d->%d at (%.1f, %.1f, %.1f); speed %.0f -> %.0f mph (-%.0f%%); %d broken so far",
-                 size, proc, *reinterpret_cast<int32_t*>(obj + 0xC4), before, after, x, y, z, before_mph, after_mph, loss * 100, i + 1);
+                 size, proc, *reinterpret_cast<int32_t*>(obj + 0xC4), before, after, x, y, z, before_mph, after_mph, loss * 100, g_nBroken.load());
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
