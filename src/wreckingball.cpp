@@ -1565,11 +1565,20 @@ void spawn_log(const PendingLog& p) {
     uint8_t* mgr   = p.mgr;
     uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
     // this map's numbers for the log's own piece and the looks it's drawn with
-    const LogCandidate lc = nlc(table, p.c), poleLook = nlc(table, g_poleLook), logModel = nlc(table, g_logModel);
+    const LogCandidate poleLook = nlc(table, g_poleLook), logModel = nlc(table, g_logModel);
+    LogCandidate lc = nlc(table, p.c);
     if (lc.def == 0xFFFE) {
+        // the piece that's normally its body (the wooden pylon's pole, 28:3) isn't on this map
+        // (Storm Island): the trunk it's drawn with is its body instead
+        LogCandidate want = p.pole ? poleLook : logModel;
+        LogCandidate look = want.def != 0xFFFF ? pick_look(table, want) : want;
         static std::atomic<int> nm{0};
-        if (++nm <= 10) logf("%s %d: definition %u isn't on this map; left out", p.pole ? "pole" : "log", p.n, p.c.def);
-        return;
+        if (look.def >= 0xFFFE) {
+            if (++nm <= 10) logf("%s %d: definition %u isn't on this map, nor a trunk to use instead; left out", p.pole ? "pole" : "log", p.n, p.c.def);
+            return;
+        }
+        if (++nm <= 3) dlogf("%s %d: definition %u isn't on this map; %u:%u is its body instead", p.pole ? "pole" : "log", p.n, p.c.def, look.def, look.piece);
+        lc = look;
     }
     uint32_t id    = ((uint32_t)lc.piece << 16) | lc.def;
     // the definition and piece must exist
