@@ -569,12 +569,17 @@ int tree_def(uint8_t* table, bool big) {
 // Groups are written with mainland numbers when a procedural loads; when its area registers with
 // the world (d_cellAdd), the map is known and they're put into its numbers. A group whose object
 // this map hasn't got gets a stand-in (map_group_def), or, failing that, no children.
-struct OurGroups { size_t first; std::vector<int> defs, counts; uint8_t* table; uint8_t* list; };
+struct OurGroups { size_t first; std::vector<int> defs, counts, models, starts; uint8_t* table; uint8_t* list; };
 std::mutex g_ourLock;
 std::unordered_map<uint8_t*, OurGroups> g_ourGroups;
 void note_our_groups(uint8_t* data, size_t first, const Group* g, int n) {
-    OurGroups o{first, {}, {}, nullptr, nullptr};
-    for (int k = 0; k < n; ++k) { o.defs.push_back(g[k].def); o.counts.push_back(g[k].count); }
+    OurGroups o{first, {}, {}, {}, {}, nullptr, nullptr};
+    for (int k = 0; k < n; ++k) {
+        o.defs.push_back(g[k].def);
+        o.counts.push_back(g[k].count);
+        o.models.push_back(g[k].model);
+        o.starts.push_back(g[k].start);
+    }
     std::lock_guard<std::mutex> l(g_ourLock);
     g_ourGroups[data] = std::move(o);
 }
@@ -602,6 +607,10 @@ void translate_groups(uint8_t* mgr, uint8_t* data) {
     MsvcVector* grp = vec_at(data + D_GROUPS);
     if (grp->count(sizeof(Group)) != o.first + o.defs.size()) { g_ourGroups.erase(it); return; }
     auto* g = reinterpret_cast<Group*>(grp->first) + o.first;
+    // still the groups we wrote (same batches and runs)? The note is keyed by the data's address,
+    // which the game reuses for other procedurals as areas stream in and out
+    for (size_t k = 0; k < o.defs.size(); ++k)
+        if (g[k].model != o.models[k] || g[k].start != o.starts[k]) { g_ourGroups.erase(it); return; }
     int changed = 0, dropped = 0;
     for (size_t k = 0; k < o.defs.size(); ++k) {
         int d = o.defs[k];
@@ -854,8 +863,24 @@ void inspect_and_inject(uint8_t* data) {
              g_treesInjected.load(), g_trunkCount.load());
 }
 
+// A procedural data object is loaded (again, or a new one at a freed one's address): what we
+// noted about whatever was there before no longer applies.
+void forget_data(uint8_t* data) {
+    {
+        std::lock_guard<std::mutex> l(g_ourLock);
+        g_ourGroups.erase(data);
+    }
+    {
+        std::lock_guard<std::mutex> l(g_sizeLock);
+        g_childTier.erase(data);
+    }
+    std::lock_guard<std::mutex> l(g_barrierLock);
+    g_barrierData.erase(data);
+}
+
 void d_deserialize(uint8_t* data, void* archive) {
     o_deserialize(data, archive);
+    forget_data(data);
     __try {
         inspect_and_inject(data);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
