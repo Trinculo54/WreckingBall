@@ -2785,6 +2785,41 @@ void mods_row_changed(void* user, const char* key, int value) {
     logf("%s set to %d on the Mods page%s", key, value, r->restart ? " (from the next start)" : "");
 }
 
+// The slowdown numbers, as sliders (platform 2.4.0 / API 5). They apply straight away.
+struct ModsSlider {
+    const char* key;      // also the ini key
+    const char* label;
+    const char* description;
+    float* value;
+    float min, max, step, scale;
+    int decimals;
+};
+const ModsSlider kModsSliders[] = {
+    {"SpeedLoss", "Tree slowdown", "How much of your speed a normal-sized tree takes, in percent. Bigger trees take more, smaller ones less.",
+     &g_speedLoss, 0.0f, 0.40f, 0.01f, 100.0f, 0},
+    {"SpeedLossMax", "Biggest tree slowdown", "The most of your speed any one tree can take, in percent, however big it is.",
+     &g_speedLossMax, 0.0f, 0.90f, 0.01f, 100.0f, 0},
+    {"SpeedLossExponent", "Tree size effect",
+     "How much more big trees slow you down than small ones. 0 = every tree the same, 1 = in proportion to size, higher = big trees much more.",
+     &g_speedLossExponent, 0.0f, 3.0f, 0.1f, 1.0f, 1},
+    {"BushSpeedLoss", "Bush slowdown", "How much of your speed a bush, hedge or crop takes, in percent.", &g_bushSpeedLoss, 0.0f, 0.20f, 0.01f,
+     100.0f, 0},
+    {"BarrierSpeedLoss", "Fence slowdown", "How much of your speed a fence, railing or piece of clutter takes, in percent.", &g_barrierSpeedLoss,
+     0.0f, 0.30f, 0.01f, 100.0f, 0},
+    {"PoleSpeedLoss", "Telephone pole slowdown", "How much of your speed a telephone pole takes, in percent.", &g_poleSpeedLoss, 0.0f, 0.50f,
+     0.01f, 100.0f, 0},
+};
+
+void mods_slider_changed(void* user, const char* key, float value) {
+    const ModsSlider* r = static_cast<const ModsSlider*>(user);
+    *r->value           = value;
+    wchar_t k[64], v[32];
+    MultiByteToWideChar(CP_UTF8, 0, key, -1, k, 64);
+    swprintf(v, 32, L"%.4g", (double)value);
+    WritePrivateProfileStringW(L"WreckingBall", k, v, (g_dir + L"\\WreckingBall.ini").c_str());
+    logf("%s set to %.4g on the Mods page", key, (double)value);
+}
+
 void add_mods_rows() {
     if (g_api->api_version < 4) return;   // an older platform: no Mods page
     for (const ModsRow& r : kModsRows) {
@@ -2797,6 +2832,24 @@ void add_mods_rows() {
         s.needs_restart = r.restart;
         s.on_change     = mods_row_changed;
         s.user          = const_cast<ModsRow*>(&r);
+        g_api->add_setting(g_mod, &s);
+    }
+    if (g_api->api_version < 5) return;   // sliders came with platform 2.4.0
+    for (const ModsSlider& r : kModsSliders) {
+        FH2Setting s{};
+        s.size          = sizeof s;
+        s.key           = r.key;
+        s.label         = r.label;
+        s.description   = r.description;
+        s.kind          = FH2_SETTING_SLIDER;
+        s.min           = r.min;
+        s.max           = r.max;
+        s.step          = r.step;
+        s.slider_value  = *r.value;
+        s.display_scale = r.scale;
+        s.decimals      = r.decimals;
+        s.on_slide      = mods_slider_changed;
+        s.user          = const_cast<ModsSlider*>(&r);
         g_api->add_setting(g_mod, &s);
     }
 }

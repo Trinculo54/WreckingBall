@@ -38,8 +38,9 @@ Pause > Settings > MODS has WreckingBall's main switches: breakable trees,
 logs, fences and railings, roadside clutter, falling telephone poles, solid
 concrete pylons and debris clean-up. Logs, poles, pylons and clean-up
 switch straight away. Trees, fences and clutter take a restart, and the
-game offers to restart for you when you leave the page. Changes are saved
-to WreckingBall.ini.
+game offers to restart for you when you leave the page. Under the switches
+are sliders for how much trees, bushes, fences and telephone poles slow you
+down; they apply as you move them. Changes are saved to WreckingBall.ini.
 
 
 Settings (fh2-mods\WreckingBall.ini)

@@ -20,7 +20,7 @@ It's a single DLL. The game's files are never touched, so removing it puts every
 
 **Debris clean-up.** Broken pieces fade out after 45 seconds, or once you're 120 m away, so the world doesn't fill up with wreckage.
 
-**Switches in the game.** Pause > Settings gets a MODS tile with WreckingBall's main switches: breakable trees, logs, fences and railings, roadside clutter, falling telephone poles, solid concrete pylons and debris clean-up. Logs, poles, pylons and clean-up change straight away. Trees, fences and clutter are added to the world as each area loads, so they take a restart, and the game offers to restart for you when you leave the page. Every change is saved to `WreckingBall.ini`.
+**Switches in the game.** Pause > Settings gets a MODS tile with WreckingBall's main switches: breakable trees, logs, fences and railings, roadside clutter, falling telephone poles, solid concrete pylons and debris clean-up. Logs, poles, pylons and clean-up change straight away. Trees, fences and clutter are added to the world as each area loads, so they take a restart, and the game offers to restart for you when you leave the page. Under the switches are sliders for how much each thing slows you down: trees, the biggest trees, how much more big trees take than small ones, bushes, fences and telephone poles. They apply as you move them. Every change is saved to `WreckingBall.ini`.
 
 ## Install
 
@@ -34,7 +34,7 @@ When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO
 
 ### Using it with other FH2 mods
 
-`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, which is the one in its zip. The MODS page in the game comes with platform 2.3.0; on 2.2 everything else works and the switches are in the ini only.
+`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, which is the one in its zip. The MODS page in the game comes with platform 2.3.0 and its sliders with 2.4.0; on an older platform everything else works and those settings are in the ini only.
 
 ## Settings
 
