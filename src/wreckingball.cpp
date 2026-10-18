@@ -217,6 +217,8 @@ constexpr uintptr_t RVA_DECODE_INSTANCE = 0x1874600;
 constexpr int NUM_TIERS = 24, TIER_ZERO = 8;   // size = 2^((tier - 8) / 4): 0.25 .. ~11
 constexpr int CLONE_BASE = 0xF000;             // definition IDs for the copies
 constexpr int BUSH_TIER = 0xFF;                // a bush's entry in g_childTier (it uses BushDef, not a tier)
+int nd(uint8_t* table, int def);              // a mainland definition number on this map (below)
+int tree_def(uint8_t* table, bool big);       // this map's tree definition
 constexpr size_t DEF_SIZE = 0xF0;              // CCollObjPhysicsDefinition
 float tier_size(int t) { return std::pow(2.0f, (t - TIER_ZERO) / 4.0f); }
 int size_tier(float size) {
@@ -265,7 +267,7 @@ std::atomic<uint8_t*> g_cloneSource{nullptr};
 std::mutex g_cloneLock;
 
 uint8_t* get_clone(uint8_t* table, int tier) {
-    uint8_t* src = o_defLookup(table, 0xFFFF0000u | (uint32_t)(g_treeDef & 0xFFFF));
+    uint8_t* src = o_defLookup(table, 0xFFFF0000u | (uint32_t)(tree_def(table, false) & 0xFFFF));
     if (src != g_cloneSource.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> l(g_cloneLock);
         if (src != g_cloneSource.load()) {
@@ -368,7 +370,7 @@ std::atomic<uint8_t*> g_bigDefPatched{nullptr};
 void patch_big_def(uint8_t* table) {
     if (g_sizeTiers || g_treeObjectType < 0 || g_treeObjectType > 255) return;
     __try {
-        uint8_t* d = o_defLookup(table, 0xFFFF0000u | (uint32_t)(g_bigTreeDef & 0xFFFF));
+        uint8_t* d = o_defLookup(table, 0xFFFF0000u | (uint32_t)(tree_def(table, true) & 0xFFFF));
         if (!d || d == g_bigDefPatched.load(std::memory_order_relaxed)) return;
         uint8_t old = d[0xC8];
         d[0xC8]     = (uint8_t)g_treeObjectType;
@@ -386,21 +388,21 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
     uint32_t lo = id & 0xFFFF;
     if (lo == POLE_RENDER_DEF) {
         if (uint8_t* d = g_poleRenderDef.load(std::memory_order_acquire)) return d;
-        return o_defLookup(table, (id & 0xFFFF0000u) | 28u);
+        return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
     }
     if (lo == LOG_RENDER_DEF) {
         if (uint8_t* d = g_logRenderDef.load(std::memory_order_acquire)) return d;
-        return o_defLookup(table, (id & 0xFFFF0000u) | 28u);
+        return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
     }
-    if (lo == (uint32_t)(g_bigTreeDef & 0xFFFF) && (id >> 16) == 0xFFFF) patch_big_def(table);
+    if (!g_sizeTiers && (id >> 16) == 0xFFFF && lo == (uint32_t)(tree_def(table, true) & 0xFFFF)) patch_big_def(table);
     if (!g_defsDumped.load(std::memory_order_relaxed)) dump_defs(table);
     if (lo >= (uint32_t)CLONE_BASE && lo < (uint32_t)(CLONE_BASE + NUM_TIERS)) {
         // A broken-off piece (high 16 bits = piece index): the tree definition's own piece.
-        if ((id >> 16) != 0xFFFF) return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(g_treeDef & 0xFFFF));
+        if ((id >> 16) != 0xFFFF) return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(tree_def(table, false) & 0xFFFF));
         __try {
             return get_clone(table, (int)(lo - CLONE_BASE));
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return o_defLookup(table, 0xFFFF0000u | (uint32_t)(g_treeDef & 0xFFFF));
+            return o_defLookup(table, 0xFFFF0000u | (uint32_t)(tree_def(table, false) & 0xFFFF));
         }
     }
     return o_defLookup(table, id);
@@ -409,7 +411,7 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
 int d_defModel(uint8_t* table, uint32_t id) {
     uint32_t lo = id & 0xFFFF;
     if (lo >= (uint32_t)CLONE_BASE && lo < (uint32_t)(CLONE_BASE + NUM_TIERS))
-        return o_defModel(table, (id & 0xFFFF0000u) | (uint32_t)(g_treeDef & 0xFFFF));
+        return o_defModel(table, (id & 0xFFFF0000u) | (uint32_t)(tree_def(table, false) & 0xFFFF));
     return o_defModel(table, id);
 }
 
@@ -493,6 +495,133 @@ const DefName* exact_def(const char* model) {
         if (_stricmp(d.name, base) == 0) return &d;
     return nullptr;
 }
+// ---- definition numbers per map -------------------------------------------------------
+// Each map has its own list of breakable definitions, numbered in its own order: on Storm Island
+// 97 (the mainland's apple tree) is a porta-loo and 110 (the flattening bush) an electronic
+// arrow sign. The mod's numbers, and the ini's, are the mainland's; nd() turns one into the
+// number on the map that `table` belongs to, by the definition's name (hashed at def+0xC4), or
+// -1 if that map hasn't got it. Numbers the mod has no name for are passed through.
+struct DefMap { uint8_t* table; uint8_t* list; uint8_t* end; bool moved; int16_t nat[0x1000]; };
+std::mutex g_defMapLock;
+std::vector<DefMap*> g_defMaps;                 // never freed: a few KB per map
+std::atomic<DefMap*> g_lastDefMap{nullptr};
+
+// table+8 and +0x10 are the list's begin and end: a list still being filled gets looked at again
+DefMap* def_map(uint8_t* table, uint8_t* list, uint8_t* end) {
+    std::lock_guard<std::mutex> l(g_defMapLock);
+    for (DefMap* m : g_defMaps)
+        if (m->table == table && m->list == list && m->end == end) { g_lastDefMap.store(m, std::memory_order_release); return m; }
+    auto* m = new DefMap{table, list, end, false, {}};
+    for (auto& v : m->nat) v = -2;              // -2: not one we know by name; passed through
+    std::unordered_map<uint32_t, int> byHash;
+    uint8_t** defs = reinterpret_cast<uint8_t**>(list);
+    int misses = 0, found = 0;
+    size_t count = end ? (size_t)(end - list) / 8 : 0x1000;
+    for (size_t i = 0; i < count && misses < 64; ++i) {
+        if (!readable(defs + i, 8)) break;
+        uint8_t* d = defs[i];
+        if (!readable(d, DEF_SIZE) || *reinterpret_cast<uintptr_t*>(d) != g_base + 0x2EB5BD8) { ++misses; continue; }
+        misses = 0;
+        ++found;
+        byHash.emplace(*reinterpret_cast<uint32_t*>(d + 0xC4), (int)i);
+    }
+    auto hf = reinterpret_cast<NameHashFn>(g_base + 0x126E020);
+    int moved = 0, missing = 0;
+    for (const DefName& dn : k_defNames) {
+        if (dn.def < 0 || dn.def >= 0x1000) continue;
+        auto it = byHash.find(hf(dn.name, true, 0x1505));
+        if (it == byHash.end()) { m->nat[dn.def] = -1; ++missing; continue; }
+        m->nat[dn.def] = (int16_t)it->second;
+        if (it->second != dn.def) ++moved;
+    }
+    m->moved = moved || missing;
+    g_defMaps.push_back(m);
+    g_lastDefMap.store(m, std::memory_order_release);
+    if (m->moved)
+        logf("breakable definitions: %d on this map, numbered differently from the mainland (%d moved, %d not here); using this map's numbers",
+             found, moved, missing);
+    else
+        dlogf("breakable definitions: %d on this map, numbered as on the mainland", found);
+    return m;
+}
+
+int nd(uint8_t* table, int def) {
+    if (!table || def < 0 || def >= 0x1000) return def;
+    uint8_t* list = *reinterpret_cast<uint8_t**>(table + 8);
+    uint8_t* end  = *reinterpret_cast<uint8_t**>(table + 0x10);
+    // only when it looks like the list's end (a vector); otherwise the list is walked to its last definition
+    if (!(end > list && (size_t)(end - list) % 8 == 0 && (size_t)(end - list) / 8 <= 0x1000)) end = nullptr;
+    DefMap* m     = g_lastDefMap.load(std::memory_order_acquire);
+    if (!m || m->table != table || m->list != list || m->end != end) m = def_map(table, list, end);
+    int v = m->nat[def];
+    return v == -2 ? def : v;
+}
+
+int g_treeAlts[8] = {97, 262, 98, 263};      // trees to break as when one isn't loaded (TreeAlts)
+int g_nTreeAlts = 4;
+int tree_def(uint8_t* table, bool big) {
+    int v = nd(table, big ? g_bigTreeDef : g_treeDef);
+    for (int k = 0; v < 0 && k < g_nTreeAlts; ++k) v = nd(table, g_treeAlts[k]);
+    return v >= 0 ? v : big ? g_bigTreeDef : g_treeDef;
+}
+
+// ---- the groups we add, in this map's numbers ---------------------------------------------
+// Groups are written with mainland numbers when a procedural loads; when its area registers with
+// the world (d_cellAdd), the map is known and they're put into its numbers. A group whose object
+// this map hasn't got gets a stand-in (map_group_def), or, failing that, no children.
+struct OurGroups { size_t first; std::vector<int> defs, counts; uint8_t* table; uint8_t* list; };
+std::mutex g_ourLock;
+std::unordered_map<uint8_t*, OurGroups> g_ourGroups;
+void note_our_groups(uint8_t* data, size_t first, const Group* g, int n) {
+    OurGroups o{first, {}, {}, nullptr, nullptr};
+    for (int k = 0; k < n; ++k) { o.defs.push_back(g[k].def); o.counts.push_back(g[k].count); }
+    std::lock_guard<std::mutex> l(g_ourLock);
+    g_ourGroups[data] = std::move(o);
+}
+// A stand-in for an object this map hasn't got: another tree for a tree, else the flattening
+// bush. Its collision is already filtered out, so it has to break somehow.
+int map_group_def(uint8_t* table, int d) {
+    int v = nd(table, d);
+    if (v >= 0) return v;
+    bool treeish = d == g_treeDef || d == g_bigTreeDef || d == g_bushDef;
+    for (int k = 0; k < g_nTreeAlts; ++k) treeish = treeish || d == g_treeAlts[k];
+    for (int k = 0; treeish && k < g_nTreeAlts; ++k) if ((v = nd(table, g_treeAlts[k])) >= 0) return v;
+    if ((v = nd(table, g_bushDef > 0 ? g_bushDef : 110)) >= 0) return v;
+    for (int k = 0; k < g_nTreeAlts; ++k) if ((v = nd(table, g_treeAlts[k])) >= 0) return v;
+    return -1;
+}
+void translate_groups(uint8_t* mgr, uint8_t* data) {
+    uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
+    if (!table || !readable(table + 8, 8)) return;
+    uint8_t* list = *reinterpret_cast<uint8_t**>(table + 8);
+    std::lock_guard<std::mutex> l(g_ourLock);
+    auto it = g_ourGroups.find(data);
+    if (it == g_ourGroups.end()) return;
+    OurGroups& o = it->second;
+    if (o.table == table && o.list == list) return;
+    MsvcVector* grp = vec_at(data + D_GROUPS);
+    if (grp->count(sizeof(Group)) != o.first + o.defs.size()) { g_ourGroups.erase(it); return; }
+    auto* g = reinterpret_cast<Group*>(grp->first) + o.first;
+    int changed = 0, dropped = 0;
+    for (size_t k = 0; k < o.defs.size(); ++k) {
+        int d = o.defs[k];
+        if (d < 0 || d >= 0xF000) continue;   // our own copies (SizeTiers) look themselves up
+        int v = map_group_def(table, d);
+        if (v >= 0 && nd(table, d) < 0) {
+            static std::atomic<int> ns{0};
+            if (++ns <= 20) logf("definition %d isn't on this map; its objects break as %d instead", d, v);
+        }
+        int count = v < 0 ? 0 : o.counts[k];
+        if (v < 0) { v = d; ++dropped; }
+        if (g[k].def != v || g[k].count != count) { g[k].def = v; g[k].count = count; ++changed; }
+    }
+    o.table = table;
+    o.list  = list;
+    static std::atomic<int> nl{0};
+    if (changed && ++nl <= 20)
+        dlogf("procedural %p: %d of our groups put into this map's numbers (%d without children: nothing to break as)", data, changed, dropped);
+}
+
 int g_clutter = 1;
 char g_clutterExcludeLibs[256] = "TREEANDBUSHTEMPLATE,CROWDTEMPLATE";
 std::atomic<int> g_clutterInstances{0};
@@ -617,6 +746,7 @@ void inject_barriers(uint8_t* data, const char* lib) {
     }
     auto* g = reinterpret_cast<Group*>(grp->first) + nOld;
     for (int k = 0; k < n; ++k) g[k] = Group{runs[k].def, runs[k].batch, runs[k].start, runs[k].count, -1, 0, 0};
+    note_our_groups(data, nOld, g, n);
     {
         std::lock_guard<std::mutex> l(g_barrierLock);
         g_barrierData.insert(data);
@@ -710,6 +840,7 @@ void inspect_and_inject(uint8_t* data) {
                      : g_sizeTiers ? CLONE_BASE + runs[k].tier
                                    : (tier_size(runs[k].tier) >= g_lumberjackMinSize - 0.01f ? g_bigTreeDef : g_treeDef),
                      runs[k].batch, runs[k].start, runs[k].count, -1, 0, 0};
+    note_our_groups(data, 0, g, n);
     {
         std::vector<uint8_t> tiers;
         for (int k = 0; k < n; ++k) tiers.insert(tiers.end(), (size_t)runs[k].count, (uint8_t)runs[k].tier);
@@ -752,6 +883,7 @@ void d_cellAdd(uint8_t* mgr, uint8_t* msg) {
         const char* name = "";
         if (prov && *reinterpret_cast<uintptr_t*>(prov) == g_base + RVA_MODELS_VTABLE) {
             uint8_t* data = *reinterpret_cast<uint8_t**>(prov + 0xF8);
+            translate_groups(mgr, data);   // into this map's definition numbers
             if (is_barrier_data(data)) mark_barrier_proc(*reinterpret_cast<int32_t*>(prov + 0x58));
         }
         if (is_tree_provider(prov, &name)) {
@@ -1279,31 +1411,47 @@ LogCandidate g_poleLook{97, 4};           // and the falling telephone pole
 // and tree pieces fall back on the first of these whose models are loaded where they break.
 LogCandidate g_lookAlts[8] = {{97, 4}, {262, 4}, {98, 4}, {263, 4}};
 int g_nLookAlts = 4;
-int g_treeAlts[8] = {97, 262, 98, 263};
-int g_nTreeAlts = 4;
 bool model_resident(int model);
 bool def_resident(uint8_t* table, int def);
 char g_logModelScale[256] = "948:0.85/0.4";   // LogModelScale: "model:length/thickness,..." extra per-model factors
 // A stand-in model's size relative to the preferred one, from LogModelScale ("model:length/thickness").
-void look_factors(int /*want*/, int got, float* lenK, float* thickK) {
+// a look's definition on this map (def 0xFFFE: this map hasn't got it)
+LogCandidate nlc(uint8_t* table, LogCandidate c) {
+    if (c.def == 0xFFFF) return c;
+    int v = nd(table, c.def);
+    return LogCandidate{(uint16_t)(v < 0 ? 0xFFFE : v), c.piece};
+}
+// LogModelScale's model numbers are the mainland's; the models we know them as, on this map
+int native_model(uint8_t* table, int m) {
+    DefMap* dm = g_lastDefMap.load(std::memory_order_acquire);
+    if (!dm || dm->table != table || !dm->moved) return m;
+    static const struct { int model, def, piece; } known[] = {{948, 262, 4}};   // the olive trunk
+    for (const auto& k : known)
+        if (k.model == m) {
+            int d = nd(table, k.def);
+            return d < 0 ? -1 : o_defModel(table, ((uint32_t)k.piece << 16) | (uint32_t)d);
+        }
+    return -1;
+}
+void look_factors(uint8_t* table, int got, float* lenK, float* thickK) {
     *lenK = *thickK = 1.0f;
     for (const char* r = g_logModelScale; *r;) {
         while (*r == ' ' || *r == ',') ++r;
         if (!*r) break;
         int m = 0; float l = 1, t = 1;
-        if (sscanf(r, "%d:%f/%f", &m, &l, &t) >= 2 && m == got) { *lenK *= l; *thickK *= (t > 0 ? t : l); }
+        if (sscanf(r, "%d:%f/%f", &m, &l, &t) >= 2 && native_model(table, m) == got) { *lenK *= l; *thickK *= (t > 0 ? t : l); }
         while (*r && *r != ',') ++r;
     }
 }
 // the first look whose model is loaded (the preferred one first), or the preferred one.
-// *loaded says whether the one returned is loaded: where none is (Storm Island has no apple
-// or olive trees), the game would draw its grey stand-in box, stretched to log size.
+// `want` is in this map's numbers; *loaded says whether the one returned is loaded.
 LogCandidate pick_look(uint8_t* table, LogCandidate want, bool* loaded = nullptr) {
     if (loaded) *loaded = true;
     if (want.def == 0xFFFF || !g_loadedLooks) return want;
-    if (model_resident(o_defModel(table, ((uint32_t)want.piece << 16) | want.def))) return want;
+    if (want.def != 0xFFFE && model_resident(o_defModel(table, ((uint32_t)want.piece << 16) | want.def))) return want;
     for (int k = 0; k < g_nLookAlts; ++k) {
-        LogCandidate c = g_lookAlts[k];
+        LogCandidate c = nlc(table, g_lookAlts[k]);
+        if (c.def == 0xFFFE) continue;
         uint8_t* whole = o_defLookup(table, 0xFFFF0000u | c.def);
         if (!whole || !readable(whole, 0xA0) || c.piece >= *reinterpret_cast<uint32_t*>(whole + 0x94)) continue;
         if (model_resident(o_defModel(table, ((uint32_t)c.piece << 16) | c.def))) return c;
@@ -1416,25 +1564,20 @@ uint8_t* render_def_for(uint8_t* table, uint32_t mid, float scale, bool pole) {
 void spawn_log(const PendingLog& p) {
     uint8_t* mgr   = p.mgr;
     uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
-    uint32_t id    = ((uint32_t)p.c.piece << 16) | p.c.def;
-    // the definition and piece must exist
-    uint8_t* whole = o_defLookup(table, 0xFFFF0000u | p.c.def);
-    if (!whole || *reinterpret_cast<uintptr_t*>(whole) != g_base + 0x2EB5BD8) { dlogf("log %d: %u is not a definition", p.n, p.c.def); return; }
-    if (p.c.piece != 0xFFFF && p.c.piece >= *reinterpret_cast<uint32_t*>(whole + 0x94)) {
-        dlogf("log %d: definition %u has no piece %u", p.n, p.c.def, p.c.piece);
+    // this map's numbers for the log's own piece and the looks it's drawn with
+    const LogCandidate lc = nlc(table, p.c), poleLook = nlc(table, g_poleLook), logModel = nlc(table, g_logModel);
+    if (lc.def == 0xFFFE) {
+        static std::atomic<int> nm{0};
+        if (++nm <= 10) logf("%s %d: definition %u isn't on this map; left out", p.pole ? "pole" : "log", p.n, p.c.def);
         return;
     }
-    // nothing loaded here to draw it with: no log (or falling pole) rather than a stand-in box
-    if (g_loadedLooks) {
-        bool loaded = true;
-        if (p.pole) pick_look(table, g_poleLook, &loaded);
-        else if (g_logModel.def != 0xFFFF) pick_look(table, g_logModel, &loaded);
-        else loaded = model_resident(o_defModel(table, id));
-        if (!loaded) {
-            static std::atomic<int> nn{0};
-            if (++nn <= 10) logf("%s %d: no model to draw it with is loaded here; left out", p.pole ? "pole" : "log", p.n);
-            return;
-        }
+    uint32_t id    = ((uint32_t)lc.piece << 16) | lc.def;
+    // the definition and piece must exist
+    uint8_t* whole = o_defLookup(table, 0xFFFF0000u | lc.def);
+    if (!whole || *reinterpret_cast<uintptr_t*>(whole) != g_base + 0x2EB5BD8) { dlogf("log %d: %u is not a definition", p.n, lc.def); return; }
+    if (lc.piece != 0xFFFF && lc.piece >= *reinterpret_cast<uint32_t*>(whole + 0x94)) {
+        dlogf("log %d: definition %u has no piece %u", p.n, lc.def, lc.piece);
+        return;
     }
     // free slot: the set at mgr+0x508 (value at node+0x1C), else recycle the farthest loose piece
     int slot;
@@ -1475,31 +1618,29 @@ void spawn_log(const PendingLog& p) {
     if (p.pole) {
         // a pole: drawn with PoleModel (the apple trunk's bark by default), with a copy of that
         // piece's definition whose culling radius covers the stretch
-        LogCandidate look = pick_look(table, g_poleLook);
-        uint32_t mid = look.def != 0xFFFF ? ((uint32_t)look.piece << 16) | look.def : id;
+        LogCandidate look = pick_look(table, poleLook);
+        uint32_t mid = look.def < 0xFFFE ? ((uint32_t)look.piece << 16) | look.def : id;
         model = o_defModel(table, mid);
-        look_factors(o_defModel(table, ((uint32_t)g_poleLook.piece << 16) | g_poleLook.def), model, &lenK, &thickK);
+        look_factors(table, model, &lenK, &thickK);
         renderDef = render_def_for(table, mid, std::max(p.length * lenK, p.thick * thickK) + 1.0f, true);
         g_poleRenderDef.store(renderDef);
-        if (look.def != g_poleLook.def || look.piece != g_poleLook.piece) {
+        if (look.def != poleLook.def || look.piece != poleLook.piece) {
             int k = ++g_lookSwaps;
-            if (k <= 20) dlogf("pole %d: model %d (%u:%u) isn't loaded here; drawn with %d (%u:%u) instead", p.n,
-                              o_defModel(table, ((uint32_t)g_poleLook.piece << 16) | g_poleLook.def), g_poleLook.def, g_poleLook.piece, model,
-                              look.def, look.piece);
+            if (k <= 20) dlogf("pole %d: %u:%u isn't loaded here; drawn with model %d (%u:%u) instead", p.n, poleLook.def, poleLook.piece,
+                              model, look.def, look.piece);
         }
-    } else if (g_logModel.def != 0xFFFF) {
-        LogCandidate look = pick_look(table, g_logModel);
+    } else if (logModel.def != 0xFFFF && pick_look(table, logModel).def < 0xFFFE) {
+        LogCandidate look = pick_look(table, logModel);
         uint32_t mid = ((uint32_t)look.piece << 16) | look.def;
-        int want = o_defModel(table, ((uint32_t)g_logModel.piece << 16) | g_logModel.def), got = o_defModel(table, mid);
-        look_factors(want, got, &lenK, &thickK);
+        int got = o_defModel(table, mid);
+        look_factors(table, got, &lenK, &thickK);
         renderDef = render_def_for(table, mid, std::max(std::max(g_logLength, g_logLengthMax) * lenK, g_logThickness * thickK) + 1.0f, false);
         if (renderDef) {
             g_logRenderDef.store(renderDef);
             model = got;
-            if (look.def != g_logModel.def || look.piece != g_logModel.piece) {
+            if (look.def != logModel.def || look.piece != logModel.piece) {
                 int k = ++g_lookSwaps;
-                if (k <= 20) dlogf("log %d: model %d (%u:%u) isn't loaded here; drawn with %d (%u:%u) instead", p.n,
-                                  o_defModel(table, ((uint32_t)g_logModel.piece << 16) | g_logModel.def), g_logModel.def, g_logModel.piece,
+                if (k <= 20) dlogf("log %d: %u:%u isn't loaded here; drawn with model %d (%u:%u) instead", p.n, logModel.def, logModel.piece,
                                   model, look.def, look.piece);
             }
         }
@@ -1532,7 +1673,7 @@ void spawn_log(const PendingLog& p) {
     }
     int total = g_logsSpawned.fetch_add(1) + 1;
     dlogf("log %d: spawned %u:%u (model %d, mass %.2f, radius %.2f, stretched %.2f long) in slot %d at (%.1f, %.1f, %.1f); %d logs so far", p.n,
-         p.c.def, p.c.piece, model, *reinterpret_cast<float*>(o_defLookup(table, id) + 0x9C),
+         lc.def, lc.piece, model, *reinterpret_cast<float*>(o_defLookup(table, id) + 0x9C),
          *reinterpret_cast<float*>(o_defLookup(table, id) + 0x98), p.length, slot, pos[0], pos[1], pos[2], total);
 }
 
@@ -1584,30 +1725,28 @@ void d_breakPieces(uint8_t* mgr, uint8_t* obj) {
     __try {
         uint32_t id = *reinterpret_cast<uint32_t*>(obj + 0x124);
         int def = (int)(id & 0xFFFF);
-        bool tree = (id >> 16) == 0xFFFF && (def == g_treeDef || def == g_bigTreeDef || (def >= CLONE_BASE && def < CLONE_BASE + NUM_TIERS));
-        for (int k = 0; k < g_nTreeAlts && !tree; ++k) tree = (id >> 16) == 0xFFFF && def == g_treeAlts[k];
         uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
+        // this map's numbers for the trees
+        int treeDef = table ? tree_def(table, false) : g_treeDef, bigDef = table ? tree_def(table, true) : g_bigTreeDef;
+        bool tree = (id >> 16) == 0xFFFF && (def == treeDef || def == bigDef || (def >= CLONE_BASE && def < CLONE_BASE + NUM_TIERS));
+        for (int k = 0; k < g_nTreeAlts && !tree && table; ++k) tree = (id >> 16) == 0xFFFF && def == nd(table, g_treeAlts[k]);
         if (tree && table) {
-            int pieceDef = def >= CLONE_BASE ? g_treeDef : def;   // tiered copies break into the tree definition's pieces
+            int pieceDef = def >= CLONE_BASE ? treeDef : def;   // tiered copies break into the tree definition's pieces
             if (!def_resident(table, pieceDef)) {
                 for (int k = 0; k < g_nTreeAlts; ++k) {
-                    if (g_treeAlts[k] == pieceDef || !def_resident(table, g_treeAlts[k])) continue;
+                    int alt = nd(table, g_treeAlts[k]);
+                    if (alt < 0 || alt == pieceDef || !def_resident(table, alt)) continue;
                     keep = id;
-                    *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (uint32_t)g_treeAlts[k];
+                    *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (uint32_t)alt;
                     swapped = true;
                     int n = ++g_treeSwaps;
                     if (n <= 20 || n % 100 == 0)
-                        dlogf("tree pieces: definition %d isn't loaded here; broke as %d instead (%d so far)", pieceDef, g_treeAlts[k], n);
+                        dlogf("tree pieces: definition %d isn't loaded here; broke as %d instead (%d so far)", pieceDef, alt, n);
                     break;
                 }
                 if (!swapped) {
-                    // break as a definition without pieces (the flattening bush), so the game doesn't
-                    // draw its stand-in box for each piece
-                    keep = id;
-                    *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (uint32_t)(g_bushDef > 0 ? g_bushDef : 110);
-                    swapped = true;
                     static int none = 0;
-                    if (none++ < 10) logf("tree pieces: no tree's pieces are loaded here; the tree breaks without them");
+                    if (none++ < 10) logf("tree pieces: no tree's pieces are loaded here; they won't be visible");
                 }
             }
         }
@@ -2472,7 +2611,8 @@ void d_onCollision(uint8_t* obj, void* contact) {
             }
             float loss = 0, before_mph = 0, after_mph = 0;
             float carVel[4] = {0, 0, 0, 0};
-            if (g_bushDef > 0 && lo == (uint32_t)(g_bushDef & 0xFFFF)) {
+            uint8_t* defTable = *reinterpret_cast<uint8_t**>(*reinterpret_cast<uint8_t**>(obj + 0x40) + 0x4C8);
+            if (g_bushDef > 0 && (int)lo == nd(defTable, g_bushDef)) {
                 // a bush or crop: its own puff and sound come with BushDef; no log, no Lumberjack
                 apply_speed_loss(contact, size, &loss, &before_mph, &after_mph, carVel, g_bushSpeedLoss);
                 if (*g_bushEffects) spawn_effects(*reinterpret_cast<uint8_t**>(obj + 0x40), g_bushEffects, x, y, z, carVel);
