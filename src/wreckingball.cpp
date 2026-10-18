@@ -1879,6 +1879,7 @@ uint8_t* track_presentation(uint8_t* mgr) {
 // vertex array each one indexes. The mod appends a box of triangles for each such pylon the
 // query box touches. The normal's convention is learned from the game's own triangles first.
 char g_solidModels[128] = "8616";
+int g_solidOn = 1;   // SolidPylons: the switch on the Mods page
 float g_solidHalf = 0.32f, g_solidHeight = 14.0f;
 struct SolidPole {
     float minx, miny, minz, maxx, maxy, maxz;
@@ -2047,6 +2048,7 @@ using GetPolysFn = int (*)(void* world, const float* box, int max, uint8_t** tri
 GetPolysFn o_getPolys = nullptr;
 int d_getPolys(void* world, const float* box, int max, uint8_t** tris, uint8_t** verts, uint8_t flags) {
     int n = o_getPolys(world, box, max, tris, verts, flags);
+    if (!g_solidOn) return n;
     __try {
         int conv = g_triConv.load(std::memory_order_relaxed);
         if (conv == 0 && n > 0) learn_locked(tris, verts, n);
@@ -2205,6 +2207,7 @@ void update_poles(uint8_t* mgr) {
 // is DebrisDistance metres from the piece. Writing a fade time (half float) to +0x120 makes the
 // game's own update fade the piece over that many seconds and then free its slot.
 float g_debrisLifetime = 45.0f, g_debrisDistance = 120.0f;
+int g_debrisCleanup = 1;   // DebrisCleanup: the switch on the Mods page
 uint8_t* g_debrisSeen[0x1000];
 double g_debrisBorn[0x1000];
 std::atomic<int> g_debrisCleared{0};
@@ -2216,7 +2219,7 @@ double now_seconds() {
     return (double)c.QuadPart / (double)f.QuadPart;
 }
 void update_debris(uint8_t* mgr) {
-    if (g_debrisLifetime <= 0 && g_debrisDistance <= 0) return;
+    if (!g_debrisCleanup || (g_debrisLifetime <= 0 && g_debrisDistance <= 0)) return;
     static int frame = 0;
     if ((frame++ % 10) != 0) return;
     const int32_t defaultGlobal = *reinterpret_cast<const int32_t*>(g_base + 0x2C6881C);
@@ -2452,7 +2455,8 @@ std::wstring g_dir; // fh2-mods folder
 // Written to fh2-mods\WreckingBall.ini the first time the mod runs. Every setting not listed
 // here keeps its built-in default (see the README for the advanced ones).
 const char* const DEFAULT_INI =
-    "; WreckingBall settings. Changes apply the next time you start the game.\r\n"
+    "; WreckingBall settings. Changes here apply the next time you start the game. The main switches\r\n"
+    "; are also in the game, under Pause > Settings > MODS.\r\n"
     "; Delete this file to get the defaults back.\r\n"
     "[WreckingBall]\r\n"
     "\r\n"
@@ -2496,9 +2500,13 @@ const char* const DEFAULT_INI =
     "PoleSpeedLoss=0.15\r\n"
     "; the big square concrete pylons have no collision in the game; the mod makes them solid (empty = off)\r\n"
     "SolidModels=8616\r\n"
+    "; 1 = those pylons are solid, 0 = they're left as the game has them\r\n"
+    "SolidPylons=1\r\n"
     "\r\n"
     "; ---- clean-up ----\r\n"
-    "; broken pieces fade out after this many seconds, or once you're this many metres away (0 = off)\r\n"
+    "; 1 = broken pieces fade out after a while, 0 = they stay until the game clears them\r\n"
+    "DebrisCleanup=1\r\n"
+    "; ...after this many seconds, or once you're this many metres away (0 = no limit of that kind)\r\n"
     "DebrisLifetime=45\r\n"
     "DebrisDistance=120\r\n"
     "\r\n"
@@ -2510,6 +2518,7 @@ const char* const DEFAULT_INI =
     "Debug=0\r\n";
 
 int g_checkUpdates = 1;
+bool g_rowsOff = false;   // the world update couldn't be hooked
 
 void load_settings() {
     std::wstring ini = g_dir + L"\\WreckingBall.ini";
@@ -2583,6 +2592,7 @@ void load_settings() {
     g_poleMaxScale      = getf(L"PoleMaxScale", 1.3f);
     g_debrisLifetime    = getf(L"DebrisLifetime", 45.0f);
     g_debrisDistance    = getf(L"DebrisDistance", 120.0f);
+    g_debrisCleanup     = GetPrivateProfileIntW(L"WreckingBall", L"DebrisCleanup", 1, ini.c_str());
     {
         wchar_t w[256], d[256];
         MultiByteToWideChar(CP_UTF8, 0, g_poleModels, -1, d, 256);
@@ -2635,6 +2645,7 @@ void load_settings() {
     g_loadedLooks = GetPrivateProfileIntW(L"WreckingBall", L"LoadedModelFallback", 1, ini.c_str());
     {
         GetPrivateProfileStringW(L"WreckingBall", L"SolidModels", L"8616", big, 128, ini.c_str());
+        g_solidOn = GetPrivateProfileIntW(L"WreckingBall", L"SolidPylons", 1, ini.c_str());
         WideCharToMultiByte(CP_UTF8, 0, big, -1, g_solidModels, sizeof g_solidModels, nullptr, nullptr);
         auto gf = [&](const wchar_t* k, float d) {
             wchar_t w[64];
@@ -2689,6 +2700,57 @@ void load_settings() {
 
 bool code_matches(uintptr_t rva, const uint8_t* expect, size_t n) {
     return std::memcmp(reinterpret_cast<void*>(g_base + rva), expect, n) == 0;
+}
+
+// ---- the Mods page (Pause > Settings > MODS, platform 2.3.0 / API 4) ----------------------
+// The main switches, as On/Off rows. A change is saved to WreckingBall.ini straight away.
+// Trees, fences and clutter are added to the world's breakables as each area loads, so they
+// take a restart; the rest switch on and off as you go.
+struct ModsRow {
+    const char* key;      // also the ini key
+    const char* label;
+    const char* description;
+    int* flag;
+    bool restart;
+};
+const ModsRow kModsRows[] = {
+    {"InjectTrees", "Breakable trees", "Trees and bushes break when you hit them, and the biggest count for Lumberjack.", &g_inject, true},
+    {"Logs", "Logs", "Every broken tree throws a log, sized to the tree.", &g_logs, false},
+    {"Barriers", "Breakable fences and railings",
+     "Wooden and wire fences, railings, guardrails and bollards break apart. Festival fences, crowd barriers and ones with a drop behind them stay solid.",
+     &g_barriers, true},
+    {"Clutter", "Breakable roadside clutter", "Signs, bins, lamp posts and other clutter that's breakable somewhere in the game break everywhere.",
+     &g_clutter, true},
+    {"Poles", "Falling telephone poles", "Wooden telephone poles fall over when you hit them.", &g_poles, false},
+    {"SolidPylons", "Solid concrete pylons", "The big square concrete pylons, which the game left without collision, are solid.", &g_solidOn, false},
+    {"DebrisCleanup", "Debris clean-up", "Broken pieces fade out after a while, or once you're far enough away (DebrisLifetime and DebrisDistance in the ini).",
+     &g_debrisCleanup, false},
+};
+
+void mods_row_changed(void* user, const char* key, int value) {
+    const ModsRow* r = static_cast<const ModsRow*>(user);
+    if (!r->restart) *r->flag = value;
+    wchar_t k[64], v[8];
+    MultiByteToWideChar(CP_UTF8, 0, key, -1, k, 64);
+    swprintf(v, 8, L"%d", value);
+    WritePrivateProfileStringW(L"WreckingBall", k, v, (g_dir + L"\\WreckingBall.ini").c_str());
+    logf("%s set to %d on the Mods page%s", key, value, r->restart ? " (from the next start)" : "");
+}
+
+void add_mods_rows() {
+    if (g_api->api_version < 4) return;   // an older platform: no Mods page
+    for (const ModsRow& r : kModsRows) {
+        FH2Setting s{};
+        s.size          = sizeof s;
+        s.key           = r.key;
+        s.label         = r.label;
+        s.description   = r.description;
+        s.value         = *r.flag ? 1 : 0;
+        s.needs_restart = r.restart;
+        s.on_change     = mods_row_changed;
+        s.user          = const_cast<ModsRow*>(&r);
+        g_api->add_setting(g_mod, &s);
+    }
 }
 
 DWORD WINAPI setup_thread(LPVOID) {
@@ -2753,20 +2815,22 @@ DWORD WINAPI setup_thread(LPVOID) {
     else if (g_loadedLooks) logf("tree piece fallback: game code doesn't match, off");
     static const uint8_t mu[] = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55}; // CWorldCollObjMan update
     static const uint8_t so[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x88, 0x50, 0x10}; // SpawnObject
-    if (g_logs && code_matches(0x384C00, mu, sizeof mu) && code_matches(0x369690, so, sizeof so))
+    // Logs, poles and debris clean-up all run from here, and each can be switched on and off
+    // in the game (Pause > Settings > MODS), so it's hooked whatever they're set to now.
+    if (code_matches(0x384C00, mu, sizeof mu) && code_matches(0x369690, so, sizeof so))
         ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::Update", reinterpret_cast<void*>(g_base + 0x384C00),
                                    reinterpret_cast<void*>(d_mgrUpdate), reinterpret_cast<void**>(&o_mgrUpdate)) != nullptr;
-    else if (g_logs) {
-        logf("log spawning: game code doesn't match, logs are off");
-        g_logs = 0;
+    else {
+        logf("world update: game code doesn't match, logs, poles and debris clean-up are off");
+        g_logs = g_poles = g_debrisCleanup = 0;
+        g_rowsOff = true;
     }
     static const uint8_t nu[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x48, 0x20, 0x4C, 0x89, 0x40, 0x18}; // render node update
-    if (g_logs && g_logStretch) {
+    if (g_logStretch && !g_rowsOff) {
         if (*reinterpret_cast<uintptr_t*>(g_base + 0x2EB8590 + 0x338) == g_base + 0x132B390 && code_matches(0x13A41E0, nu, sizeof nu)) {
             ok &= g_api->hook_function(g_mod, "CTrackPresentation::BindCollObjInstanceToModel", reinterpret_cast<void*>(g_base + 0x132B390),
                                        reinterpret_cast<void*>(d_tpBind), reinterpret_cast<void**>(&o_tpBind)) != nullptr;
-            if (g_logs && g_logStretch)
-                ok &= g_api->hook_function(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
+            ok &= g_api->hook_function(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
                                            reinterpret_cast<void*>(d_nodeUpdate), reinterpret_cast<void**>(&o_nodeUpdate)) != nullptr;
         } else {
             logf("log stretching: game code doesn't match, off");
@@ -2783,8 +2847,9 @@ DWORD WINAPI setup_thread(LPVOID) {
         logf("ERROR: hooking failed (see platform.log)");
         return 0;
     }
-    logf("on: trees %s, logs %s, fences and railings %s, roadside clutter %s, telephone poles %s, solid pylons %s%s", g_inject ? "yes" : "no",
-         g_logs ? "yes" : "no", g_barriers ? "yes" : "no", g_clutter ? "yes" : "no", g_poles ? "yes" : "no", g_solidModels[0] ? "yes" : "no",
+    logf("on: trees %s, logs %s, fences and railings %s, roadside clutter %s, telephone poles %s, solid pylons %s, debris clean-up %s%s",
+         g_inject ? "yes" : "no", g_logs ? "yes" : "no", g_barriers ? "yes" : "no", g_clutter ? "yes" : "no", g_poles ? "yes" : "no",
+         g_solidModels[0] && g_solidOn ? "yes" : "no", g_debrisCleanup ? "yes" : "no",
          g_debug ? " (debug log on, F8 snapshot)" : "");
     return 0;
 }
@@ -2811,6 +2876,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     g_log = _wfopen((g_dir + L"\\WreckingBall.log").c_str(), L"w");
     logf("WreckingBall %s", WB_VERSION);
     api->log(g_mod, "logging to fh2-mods\\WreckingBall.log");
+    add_mods_rows();
 
     if (HANDLE t = CreateThread(nullptr, 0, setup_thread, nullptr, 0, nullptr)) CloseHandle(t);
     return 0;
