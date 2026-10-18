@@ -49,6 +49,14 @@ int g_logLibs     = 1;
 int g_maxLogLines = 4000;
 char g_prefix[256] = "*";
 char g_sizeRules[512] = "Bush_:0.5,Crop_:0.7,Skinny:0.8,Palm:0.9,Pine:1.3,Tall:1.3,Trees_:1.0";
+// Bushes and crops: models whose name contains one of these break as BushDef (the game's own
+// flattening bush: a small foliage puff, no pieces, no log, no Lumberjack). "Bush_" doesn't match
+// the olive trees ("Trees_Olive_A_Bushy").
+char g_bushModels[256] = "Bush_,Crop_";
+char g_skipModels[256] = "";   // models that stay solid, as without the mod
+int g_bushDef = 110;           // GEN_OBJ_Bush_Flatten; 0 = bushes break like trees (1.1 behaviour)
+float g_bushSpeedLoss = 0.04f; // fixed share of speed a bush takes; below 0 = by size, like trees
+char g_bushEffects[256] = "";  // extra effects on top of the bush's own puff
 int g_sizeTiers = 0;
 int g_treeObjectType = 5;
 float g_lumberjackMinSize = 1.6f;
@@ -136,6 +144,7 @@ std::atomic<int> g_procsInjected{0}, g_treesInjected{0}, g_treeCells{0}, g_treeS
 std::mutex g_seenLock;
 std::set<std::pair<int, std::string>> g_seenSmash; // (def, model) already logged
 std::set<std::string> g_seenLibs;
+std::set<std::string> g_seenModels;  // tree-procedural models already logged (Debug)
 
 void mark_tree_proc(int i);
 
@@ -207,6 +216,7 @@ constexpr uintptr_t RVA_DECODE_INSTANCE = 0x1874600;
 // ---- size tiers: each tree gets a copy of the tree definition with its own mass
 constexpr int NUM_TIERS = 24, TIER_ZERO = 8;   // size = 2^((tier - 8) / 4): 0.25 .. ~11
 constexpr int CLONE_BASE = 0xF000;             // definition IDs for the copies
+constexpr int BUSH_TIER = 0xFF;                // a bush's entry in g_childTier (it uses BushDef, not a tier)
 constexpr size_t DEF_SIZE = 0xF0;              // CCollObjPhysicsDefinition
 float tier_size(int t) { return std::pow(2.0f, (t - TIER_ZERO) / 4.0f); }
 int size_tier(float size) {
@@ -410,6 +420,7 @@ float child_size(uint8_t* data, int child) {
     std::lock_guard<std::mutex> l(g_sizeLock);
     auto it = g_childTier.find(data);
     if (it == g_childTier.end() || child < 0 || child >= (int)it->second.size()) return -1.0f;
+    if (it->second[child] == BUSH_TIER) return 0.5f;
     return tier_size(it->second[child]);
 }
 
@@ -664,13 +675,21 @@ void inspect_and_inject(uint8_t* data) {
         MsvcVector* iv   = vec_at(b + B_INSTANCES);
         int cnt          = (int)iv->count(INSTANCE_SIZE);
         if (cnt == 0 || !name_selected(name)) continue;
+        bool skip    = *g_skipModels && list_match(g_skipModels, name);
+        bool bush    = !skip && g_bushDef > 0 && *g_bushModels && list_match(g_bushModels, name);
         float factor = model_size_factor(name);
+        if (g_debug) {
+            std::lock_guard<std::mutex> l(g_seenLock);
+            if (g_seenModels.insert(name).second)
+                logf("tree model %s: %s, size %.2f (%d here)", name, skip ? "left solid" : bush ? "bush" : "tree", factor, cnt);
+        }
+        if (skip) continue;
         for (int j = 0; j < cnt; ++j) {
             alignas(16) float m[16];
             float scale = 1.0f;
             decode(data, m, iv->first + j * INSTANCE_SIZE, &scale);
             float size = factor * scale;
-            int tier   = size_tier(size);
+            int tier   = bush ? BUSH_TIER : size_tier(size);
             if (g_filterCollision >= 2) trunk_add(m[12], m[13], m[14], size);
             if (n > 0 && runs[n - 1].batch == (int)i && runs[n - 1].tier == tier) runs[n - 1].count++;
             else if (n < 4096) runs[n++] = Run{(int)i, j, 1, tier};
@@ -687,8 +706,9 @@ void inspect_and_inject(uint8_t* data) {
     }
     auto* g = reinterpret_cast<Group*>(grp->first);
     for (int k = 0; k < n; ++k)
-        g[k] = Group{g_sizeTiers ? CLONE_BASE + runs[k].tier
-                                 : (tier_size(runs[k].tier) >= g_lumberjackMinSize - 0.01f ? g_bigTreeDef : g_treeDef),
+        g[k] = Group{runs[k].tier == BUSH_TIER ? g_bushDef
+                     : g_sizeTiers ? CLONE_BASE + runs[k].tier
+                                   : (tier_size(runs[k].tier) >= g_lumberjackMinSize - 0.01f ? g_bigTreeDef : g_treeDef),
                      runs[k].batch, runs[k].start, runs[k].count, -1, 0, 0};
     {
         std::vector<uint8_t> tiers;
@@ -2032,8 +2052,8 @@ void learn_tri_convention(uint8_t** tris, uint8_t** verts, int n) {
                 g_triConv.store(1);
                 logf("triangle normals learned: sign %+.0f, w %s; solid pylons are on", g_triSign, g_triW == 0 ? "0" : g_triW == 1 ? "d" : "-d");
             } else {
-                g_triConv.store(-1);
-                logf("triangle normals: no clear convention; solid pylons stay off");
+                    g_triConv.store(-1);
+                    logf("triangle normals: no clear convention; solid pylons stay off");
             }
         }
     }
@@ -2431,6 +2451,16 @@ void d_onCollision(uint8_t* obj, void* contact) {
             }
             float loss = 0, before_mph = 0, after_mph = 0;
             float carVel[4] = {0, 0, 0, 0};
+            if (g_bushDef > 0 && lo == (uint32_t)(g_bushDef & 0xFFFF)) {
+                // a bush or crop: its own puff and sound come with BushDef; no log, no Lumberjack
+                apply_speed_loss(contact, size, &loss, &before_mph, &after_mph, carVel, g_bushSpeedLoss);
+                if (*g_bushEffects) spawn_effects(*reinterpret_cast<uint8_t**>(obj + 0x40), g_bushEffects, x, y, z, carVel);
+                static std::atomic<int> nb{0};
+                int k = ++nb;
+                if (k <= 200)
+                    dlogf("bush broke: proc=%d child=%d at (%.1f, %.1f, %.1f); speed %.0f -> %.0f mph (-%.0f%%); %d so far", proc,
+                         *reinterpret_cast<int32_t*>(obj + 0xC4), x, y, z, before_mph, after_mph, loss * 100, k);
+            } else {
             apply_speed_loss(contact, size, &loss, &before_mph, &after_mph, carVel);
             {
                 uint8_t* mgr = *reinterpret_cast<uint8_t**>(obj + 0x40);
@@ -2445,6 +2475,7 @@ void d_onCollision(uint8_t* obj, void* contact) {
                         dlogf("Wreckage RetriggerDelay is now %.2f", *reinterpret_cast<float*>(d + 0x24));
             dlogf("tree broke: size %.2f proc=%d child=%d state %d->%d at (%.1f, %.1f, %.1f); speed %.0f -> %.0f mph (-%.0f%%); %d broken so far",
                  size, proc, *reinterpret_cast<int32_t*>(obj + 0xC4), before, after, x, y, z, before_mph, after_mph, loss * 100, g_nBroken.load());
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -2470,9 +2501,18 @@ const char* const DEFAULT_INI =
     "LumberjackMinSize=1.6\r\n"
     "BigTreeEffects=Break_WoodDust,Break_Wood\r\n"
     "\r\n"
+    "; ---- bushes and crops ----\r\n"
+    "; models whose name contains one of these flatten like the game's own bushes: a small puff of leaves,\r\n"
+    "; no log, no Lumberjack (empty = they break like trees)\r\n"
+    "BushModels=Bush_,Crop_\r\n"
+    "; share of your speed a bush takes\r\n"
+    "BushSpeedLoss=0.04\r\n"
+    "; models whose name contains one of these stay solid, as without the mod\r\n"
+    "SkipModels=\r\n"
+    "\r\n"
     "; ---- logs: a log thrown out of each broken tree ----\r\n"
     "Logs=1\r\n"
-    "; trees smaller than this don't throw one (bushes are about 0.5)\r\n"
+    "; trees smaller than this don't throw one (bushes never do)\r\n"
     "LogMinSize=0.4\r\n"
     "; log size, as multiples of the model's own: length and thickness. Bigger trees throw longer logs,\r\n"
     "; kept between LogLengthMin and LogLengthMax\r\n"
@@ -2571,6 +2611,14 @@ void load_settings() {
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bigTreeEffects, sizeof g_bigTreeEffects, nullptr, nullptr);
     GetPrivateProfileStringW(L"WreckingBall", L"TreeEffects", L"", big, 512, ini.c_str());
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_treeEffects, sizeof g_treeEffects, nullptr, nullptr);
+    GetPrivateProfileStringW(L"WreckingBall", L"BushModels", L"Bush_,Crop_", big, 512, ini.c_str());
+    WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bushModels, sizeof g_bushModels, nullptr, nullptr);
+    GetPrivateProfileStringW(L"WreckingBall", L"SkipModels", L"", big, 512, ini.c_str());
+    WideCharToMultiByte(CP_UTF8, 0, big, -1, g_skipModels, sizeof g_skipModels, nullptr, nullptr);
+    GetPrivateProfileStringW(L"WreckingBall", L"BushEffects", L"", big, 512, ini.c_str());
+    WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bushEffects, sizeof g_bushEffects, nullptr, nullptr);
+    g_bushDef       = GetPrivateProfileIntW(L"WreckingBall", L"BushDef", 110, ini.c_str());
+    g_bushSpeedLoss = getf(L"BushSpeedLoss", 0.04f);
     g_barriers          = GetPrivateProfileIntW(L"WreckingBall", L"Barriers", 1, ini.c_str());
     g_barrierSkipEvents = GetPrivateProfileIntW(L"WreckingBall", L"BarrierSkipEvents", 1, ini.c_str());
     g_barrierSpeedLoss  = getf(L"BarrierSpeedLoss", 0.04f);
