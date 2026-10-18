@@ -31,12 +31,23 @@ fh2-mods, and every mod built on it ships the same file, so it's fine to
 overwrite.
 
 
+In the game
+~~~~~~~~~~~
+
+Pause > Settings > MODS has WreckingBall's main switches: breakable trees,
+logs, fences and railings, roadside clutter, falling telephone poles, solid
+concrete pylons and debris clean-up. Logs, poles, pylons and clean-up
+switch straight away. Trees, fences and clutter take a restart, and the
+game offers to restart for you when you leave the page. Changes are saved
+to WreckingBall.ini.
+
+
 Settings (fh2-mods\WreckingBall.ini)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Created on first launch, with a comment next to each setting. Changes
-apply the next time you start the game; delete the file to get the
-defaults back.
+made here apply the next time you start the game; delete the file to get
+the defaults back.
 
   InjectTrees=1        0 = trees and bushes stay solid
   SpeedLoss=0.12       share of your speed a normal tree takes
@@ -44,7 +55,8 @@ defaults back.
   Barriers=1           0 = fences and railings stay solid
   Clutter=1            0 = roadside clutter as the game had it
   Poles=1              0 = telephone poles stay solid
-  SolidModels=8616     the concrete pylons the mod makes solid; empty = off
+  SolidPylons=1        0 = concrete pylons left without collision
+  DebrisCleanup=1      0 = broken pieces stay until the game clears them
   DebrisLifetime=45    seconds before broken pieces fade out (0 = off)
   DebrisDistance=120   metres away before they fade out (0 = off)
   CheckUpdates=1       0 = don't check GitHub for a newer version
