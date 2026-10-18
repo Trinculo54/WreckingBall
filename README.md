@@ -20,6 +20,8 @@ It's a single DLL. The game's files are never touched, so removing it puts every
 
 **Debris clean-up.** Broken pieces fade out after 45 seconds, or once you're 120 m away, so the world doesn't fill up with wreckage.
 
+**Switches in the game.** Pause > Settings gets a MODS tile with WreckingBall's main switches: breakable trees, logs, fences and railings, roadside clutter, falling telephone poles, solid concrete pylons and debris clean-up. Logs, poles, pylons and clean-up change straight away. Trees, fences and clutter are added to the world as each area loads, so they take a restart, and the game offers to restart for you when you leave the page. Every change is saved to `WreckingBall.ini`.
+
 ## Install
 
 You'll need Forza Horizon 2 running on PC through Azimuth. Download the latest zip from the [Releases](../../releases) page, close Azimuth, and extract the zip into your Azimuth folder, the one with `azimuth.exe` in it. You should end up with `d3dcompiler_47.dll` next to `azimuth.exe` and `WreckingBall.dll` inside a `fh2-mods` folder. Start the game and drive into a tree.
@@ -32,11 +34,11 @@ When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO
 
 ### Using it with other FH2 mods
 
-`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, which is the one in its zip.
+`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, which is the one in its zip. The MODS page in the game comes with platform 2.3.0; on 2.2 everything else works and the switches are in the ini only.
 
 ## Settings
 
-`fh2-mods\WreckingBall.ini` is created the first time you launch, with comments next to everything. Changes apply the next time you start the game, and deleting the file gets you the defaults back.
+The main switches are in the game, under Pause > Settings > MODS (see above). Everything, those included, is in `fh2-mods\WreckingBall.ini`, created the first time you launch with comments next to everything. Changes made in the file apply the next time you start the game, and deleting it gets you the defaults back.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -57,8 +59,10 @@ When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO
 | `BarrierSpeedLoss` | `0.04` | Share of your speed a fence or railing takes. |
 | `Poles` | `1` | `0` keeps telephone poles solid. |
 | `PoleSpeedLoss` | `0.15` | Share of your speed a telephone pole takes. |
-| `SolidModels` | `8616` | Models the mod makes solid (8616 = the concrete pylons). Empty = off. |
-| `DebrisLifetime`, `DebrisDistance` | `45`, `120` | Broken pieces fade out after this many seconds, or once you're this many metres away. `0` turns either off. |
+| `SolidPylons` | `1` | `0` leaves the concrete pylons without collision, as the game has them. |
+| `SolidModels` | `8616` | Models made solid (8616 = the concrete pylons). |
+| `DebrisCleanup` | `1` | `0` leaves broken pieces until the game clears them. |
+| `DebrisLifetime`, `DebrisDistance` | `45`, `120` | Broken pieces fade out after this many seconds, or once you're this many metres away. `0` turns either limit off. |
 | `CheckUpdates` | `1` | `0` stops the update check. |
 | `Debug` | `0` | `1` writes a detailed log. F8 then adds a snapshot of the collision around the car, and the game's breakable definitions go to `WreckingBall-defs.txt`. Turn it on when reporting a problem. |
 
@@ -66,7 +70,7 @@ The Wreckage, Lumberjack and Sideswipe skills award at most once every 1, 2.5 an
 
 ## Uninstall
 
-Delete `fh2-mods\WreckingBall.dll` and `fh2-mods\WreckingBall.ini`. If you don't use any other FH2 mods, delete `d3dcompiler_47.dll` and the `fh2-mods` folder too. Nothing else was changed.
+Delete `fh2-mods\WreckingBall.dll` and `fh2-mods\WreckingBall.ini`. The next time the game starts, the platform takes the MODS tile back out (unless another mod has switches there). If you don't use any other FH2 mods, start the game once more after that, then delete `d3dcompiler_47.dll` and the `fh2-mods` folder too. Nothing else was changed.
 
 ## Known limitations
 
@@ -100,7 +104,7 @@ The mod is built with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releas
 
 ## Troubleshooting
 
-`fh2-mods\WreckingBall.log` starts fresh every launch. A working launch ends with a line like `on: trees yes, logs yes, fences and railings yes, ...`. The FH2 Mod Platform writes `fh2-mods\platform.log`, which shows whether the mod was loaded at all and lists every hook it put in. If the game crashes, the platform saves a report in `fh2-mods\crashes` that says which mod, if any, was involved.
+`fh2-mods\WreckingBall.log` starts fresh every launch. A working launch ends with a line like `on: trees yes, logs yes, fences and railings yes, ...`, and every change made on the MODS page is logged. The FH2 Mod Platform writes `fh2-mods\platform.log`, which shows whether the mod was loaded at all and lists every hook it put in. If the game crashes, the platform saves a report in `fh2-mods\crashes` that says which mod, if any, was involved.
 
 | Symptom | Fix |
 |---|---|
