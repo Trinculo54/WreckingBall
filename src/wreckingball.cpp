@@ -49,6 +49,14 @@ int g_logLibs     = 1;
 int g_maxLogLines = 4000;
 char g_prefix[256] = "*";
 char g_sizeRules[512] = "Bush_:0.5,Crop_:0.7,Skinny:0.8,Palm:0.9,Pine:1.3,Tall:1.3,Trees_:1.0";
+// Bushes and crops: models whose name contains one of these break as BushDef (the game's own
+// flattening bush: a small foliage puff, no pieces, no log, no Lumberjack). "Bush_" doesn't match
+// the olive trees ("Trees_Olive_A_Bushy").
+char g_bushModels[256] = "Bush_,Crop_";
+char g_skipModels[256] = "";   // models that stay solid, as without the mod
+int g_bushDef = 110;           // GEN_OBJ_Bush_Flatten; 0 = bushes break like trees (1.1 behaviour)
+float g_bushSpeedLoss = 0.04f; // fixed share of speed a bush takes; below 0 = by size, like trees
+char g_bushEffects[256] = "";  // extra effects on top of the bush's own puff
 int g_sizeTiers = 0;
 int g_treeObjectType = 5;
 float g_lumberjackMinSize = 1.6f;
@@ -136,6 +144,7 @@ std::atomic<int> g_procsInjected{0}, g_treesInjected{0}, g_treeCells{0}, g_treeS
 std::mutex g_seenLock;
 std::set<std::pair<int, std::string>> g_seenSmash; // (def, model) already logged
 std::set<std::string> g_seenLibs;
+std::set<std::string> g_seenModels;  // tree-procedural models already logged (Debug)
 
 void mark_tree_proc(int i);
 
@@ -207,6 +216,9 @@ constexpr uintptr_t RVA_DECODE_INSTANCE = 0x1874600;
 // ---- size tiers: each tree gets a copy of the tree definition with its own mass
 constexpr int NUM_TIERS = 24, TIER_ZERO = 8;   // size = 2^((tier - 8) / 4): 0.25 .. ~11
 constexpr int CLONE_BASE = 0xF000;             // definition IDs for the copies
+constexpr int BUSH_TIER = 0xFF;                // a bush's entry in g_childTier (it uses BushDef, not a tier)
+int nd(uint8_t* table, int def);              // a mainland definition number on this map (below)
+int tree_def(uint8_t* table, bool big);       // this map's tree definition
 constexpr size_t DEF_SIZE = 0xF0;              // CCollObjPhysicsDefinition
 float tier_size(int t) { return std::pow(2.0f, (t - TIER_ZERO) / 4.0f); }
 int size_tier(float size) {
@@ -255,7 +267,7 @@ std::atomic<uint8_t*> g_cloneSource{nullptr};
 std::mutex g_cloneLock;
 
 uint8_t* get_clone(uint8_t* table, int tier) {
-    uint8_t* src = o_defLookup(table, 0xFFFF0000u | (uint32_t)(g_treeDef & 0xFFFF));
+    uint8_t* src = o_defLookup(table, 0xFFFF0000u | (uint32_t)(tree_def(table, false) & 0xFFFF));
     if (src != g_cloneSource.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> l(g_cloneLock);
         if (src != g_cloneSource.load()) {
@@ -358,7 +370,7 @@ std::atomic<uint8_t*> g_bigDefPatched{nullptr};
 void patch_big_def(uint8_t* table) {
     if (g_sizeTiers || g_treeObjectType < 0 || g_treeObjectType > 255) return;
     __try {
-        uint8_t* d = o_defLookup(table, 0xFFFF0000u | (uint32_t)(g_bigTreeDef & 0xFFFF));
+        uint8_t* d = o_defLookup(table, 0xFFFF0000u | (uint32_t)(tree_def(table, true) & 0xFFFF));
         if (!d || d == g_bigDefPatched.load(std::memory_order_relaxed)) return;
         uint8_t old = d[0xC8];
         d[0xC8]     = (uint8_t)g_treeObjectType;
@@ -376,21 +388,21 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
     uint32_t lo = id & 0xFFFF;
     if (lo == POLE_RENDER_DEF) {
         if (uint8_t* d = g_poleRenderDef.load(std::memory_order_acquire)) return d;
-        return o_defLookup(table, (id & 0xFFFF0000u) | 28u);
+        return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
     }
     if (lo == LOG_RENDER_DEF) {
         if (uint8_t* d = g_logRenderDef.load(std::memory_order_acquire)) return d;
-        return o_defLookup(table, (id & 0xFFFF0000u) | 28u);
+        return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
     }
-    if (lo == (uint32_t)(g_bigTreeDef & 0xFFFF) && (id >> 16) == 0xFFFF) patch_big_def(table);
+    if (!g_sizeTiers && (id >> 16) == 0xFFFF && lo == (uint32_t)(tree_def(table, true) & 0xFFFF)) patch_big_def(table);
     if (!g_defsDumped.load(std::memory_order_relaxed)) dump_defs(table);
     if (lo >= (uint32_t)CLONE_BASE && lo < (uint32_t)(CLONE_BASE + NUM_TIERS)) {
         // A broken-off piece (high 16 bits = piece index): the tree definition's own piece.
-        if ((id >> 16) != 0xFFFF) return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(g_treeDef & 0xFFFF));
+        if ((id >> 16) != 0xFFFF) return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(tree_def(table, false) & 0xFFFF));
         __try {
             return get_clone(table, (int)(lo - CLONE_BASE));
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return o_defLookup(table, 0xFFFF0000u | (uint32_t)(g_treeDef & 0xFFFF));
+            return o_defLookup(table, 0xFFFF0000u | (uint32_t)(tree_def(table, false) & 0xFFFF));
         }
     }
     return o_defLookup(table, id);
@@ -399,7 +411,7 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
 int d_defModel(uint8_t* table, uint32_t id) {
     uint32_t lo = id & 0xFFFF;
     if (lo >= (uint32_t)CLONE_BASE && lo < (uint32_t)(CLONE_BASE + NUM_TIERS))
-        return o_defModel(table, (id & 0xFFFF0000u) | (uint32_t)(g_treeDef & 0xFFFF));
+        return o_defModel(table, (id & 0xFFFF0000u) | (uint32_t)(tree_def(table, false) & 0xFFFF));
     return o_defModel(table, id);
 }
 
@@ -410,6 +422,7 @@ float child_size(uint8_t* data, int child) {
     std::lock_guard<std::mutex> l(g_sizeLock);
     auto it = g_childTier.find(data);
     if (it == g_childTier.end() || child < 0 || child >= (int)it->second.size()) return -1.0f;
+    if (it->second[child] == BUSH_TIER) return 0.5f;
     return tier_size(it->second[child]);
 }
 
@@ -482,6 +495,133 @@ const DefName* exact_def(const char* model) {
         if (_stricmp(d.name, base) == 0) return &d;
     return nullptr;
 }
+// ---- definition numbers per map -------------------------------------------------------
+// Each map has its own list of breakable definitions, numbered in its own order: on Storm Island
+// 97 (the mainland's apple tree) is a porta-loo and 110 (the flattening bush) an electronic
+// arrow sign. The mod's numbers, and the ini's, are the mainland's; nd() turns one into the
+// number on the map that `table` belongs to, by the definition's name (hashed at def+0xC4), or
+// -1 if that map hasn't got it. Numbers the mod has no name for are passed through.
+struct DefMap { uint8_t* table; uint8_t* list; uint8_t* end; bool moved; int16_t nat[0x1000]; };
+std::mutex g_defMapLock;
+std::vector<DefMap*> g_defMaps;                 // never freed: a few KB per map
+std::atomic<DefMap*> g_lastDefMap{nullptr};
+
+// table+8 and +0x10 are the list's begin and end: a list still being filled gets looked at again
+DefMap* def_map(uint8_t* table, uint8_t* list, uint8_t* end) {
+    std::lock_guard<std::mutex> l(g_defMapLock);
+    for (DefMap* m : g_defMaps)
+        if (m->table == table && m->list == list && m->end == end) { g_lastDefMap.store(m, std::memory_order_release); return m; }
+    auto* m = new DefMap{table, list, end, false, {}};
+    for (auto& v : m->nat) v = -2;              // -2: not one we know by name; passed through
+    std::unordered_map<uint32_t, int> byHash;
+    uint8_t** defs = reinterpret_cast<uint8_t**>(list);
+    int misses = 0, found = 0;
+    size_t count = end ? (size_t)(end - list) / 8 : 0x1000;
+    for (size_t i = 0; i < count && misses < 64; ++i) {
+        if (!readable(defs + i, 8)) break;
+        uint8_t* d = defs[i];
+        if (!readable(d, DEF_SIZE) || *reinterpret_cast<uintptr_t*>(d) != g_base + 0x2EB5BD8) { ++misses; continue; }
+        misses = 0;
+        ++found;
+        byHash.emplace(*reinterpret_cast<uint32_t*>(d + 0xC4), (int)i);
+    }
+    auto hf = reinterpret_cast<NameHashFn>(g_base + 0x126E020);
+    int moved = 0, missing = 0;
+    for (const DefName& dn : k_defNames) {
+        if (dn.def < 0 || dn.def >= 0x1000) continue;
+        auto it = byHash.find(hf(dn.name, true, 0x1505));
+        if (it == byHash.end()) { m->nat[dn.def] = -1; ++missing; continue; }
+        m->nat[dn.def] = (int16_t)it->second;
+        if (it->second != dn.def) ++moved;
+    }
+    m->moved = moved || missing;
+    g_defMaps.push_back(m);
+    g_lastDefMap.store(m, std::memory_order_release);
+    if (m->moved)
+        logf("breakable definitions: %d on this map, numbered differently from the mainland (%d moved, %d not here); using this map's numbers",
+             found, moved, missing);
+    else
+        dlogf("breakable definitions: %d on this map, numbered as on the mainland", found);
+    return m;
+}
+
+int nd(uint8_t* table, int def) {
+    if (!table || def < 0 || def >= 0x1000) return def;
+    uint8_t* list = *reinterpret_cast<uint8_t**>(table + 8);
+    uint8_t* end  = *reinterpret_cast<uint8_t**>(table + 0x10);
+    // only when it looks like the list's end (a vector); otherwise the list is walked to its last definition
+    if (!(end > list && (size_t)(end - list) % 8 == 0 && (size_t)(end - list) / 8 <= 0x1000)) end = nullptr;
+    DefMap* m     = g_lastDefMap.load(std::memory_order_acquire);
+    if (!m || m->table != table || m->list != list || m->end != end) m = def_map(table, list, end);
+    int v = m->nat[def];
+    return v == -2 ? def : v;
+}
+
+int g_treeAlts[8] = {97, 262, 98, 263};      // trees to break as when one isn't loaded (TreeAlts)
+int g_nTreeAlts = 4;
+int tree_def(uint8_t* table, bool big) {
+    int v = nd(table, big ? g_bigTreeDef : g_treeDef);
+    for (int k = 0; v < 0 && k < g_nTreeAlts; ++k) v = nd(table, g_treeAlts[k]);
+    return v >= 0 ? v : big ? g_bigTreeDef : g_treeDef;
+}
+
+// ---- the groups we add, in this map's numbers ---------------------------------------------
+// Groups are written with mainland numbers when a procedural loads; when its area registers with
+// the world (d_cellAdd), the map is known and they're put into its numbers. A group whose object
+// this map hasn't got gets a stand-in (map_group_def), or, failing that, no children.
+struct OurGroups { size_t first; std::vector<int> defs, counts; uint8_t* table; uint8_t* list; };
+std::mutex g_ourLock;
+std::unordered_map<uint8_t*, OurGroups> g_ourGroups;
+void note_our_groups(uint8_t* data, size_t first, const Group* g, int n) {
+    OurGroups o{first, {}, {}, nullptr, nullptr};
+    for (int k = 0; k < n; ++k) { o.defs.push_back(g[k].def); o.counts.push_back(g[k].count); }
+    std::lock_guard<std::mutex> l(g_ourLock);
+    g_ourGroups[data] = std::move(o);
+}
+// A stand-in for an object this map hasn't got: another tree for a tree, else the flattening
+// bush. Its collision is already filtered out, so it has to break somehow.
+int map_group_def(uint8_t* table, int d) {
+    int v = nd(table, d);
+    if (v >= 0) return v;
+    bool treeish = d == g_treeDef || d == g_bigTreeDef || d == g_bushDef;
+    for (int k = 0; k < g_nTreeAlts; ++k) treeish = treeish || d == g_treeAlts[k];
+    for (int k = 0; treeish && k < g_nTreeAlts; ++k) if ((v = nd(table, g_treeAlts[k])) >= 0) return v;
+    if ((v = nd(table, g_bushDef > 0 ? g_bushDef : 110)) >= 0) return v;
+    for (int k = 0; k < g_nTreeAlts; ++k) if ((v = nd(table, g_treeAlts[k])) >= 0) return v;
+    return -1;
+}
+void translate_groups(uint8_t* mgr, uint8_t* data) {
+    uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
+    if (!table || !readable(table + 8, 8)) return;
+    uint8_t* list = *reinterpret_cast<uint8_t**>(table + 8);
+    std::lock_guard<std::mutex> l(g_ourLock);
+    auto it = g_ourGroups.find(data);
+    if (it == g_ourGroups.end()) return;
+    OurGroups& o = it->second;
+    if (o.table == table && o.list == list) return;
+    MsvcVector* grp = vec_at(data + D_GROUPS);
+    if (grp->count(sizeof(Group)) != o.first + o.defs.size()) { g_ourGroups.erase(it); return; }
+    auto* g = reinterpret_cast<Group*>(grp->first) + o.first;
+    int changed = 0, dropped = 0;
+    for (size_t k = 0; k < o.defs.size(); ++k) {
+        int d = o.defs[k];
+        if (d < 0 || d >= 0xF000) continue;   // our own copies (SizeTiers) look themselves up
+        int v = map_group_def(table, d);
+        if (v >= 0 && nd(table, d) < 0) {
+            static std::atomic<int> ns{0};
+            if (++ns <= 20) logf("definition %d isn't on this map; its objects break as %d instead", d, v);
+        }
+        int count = v < 0 ? 0 : o.counts[k];
+        if (v < 0) { v = d; ++dropped; }
+        if (g[k].def != v || g[k].count != count) { g[k].def = v; g[k].count = count; ++changed; }
+    }
+    o.table = table;
+    o.list  = list;
+    static std::atomic<int> nl{0};
+    if (changed && ++nl <= 20)
+        dlogf("procedural %p: %d of our groups put into this map's numbers (%d without children: nothing to break as)", data, changed, dropped);
+}
+
 int g_clutter = 1;
 char g_clutterExcludeLibs[256] = "TREEANDBUSHTEMPLATE,CROWDTEMPLATE";
 std::atomic<int> g_clutterInstances{0};
@@ -606,6 +746,7 @@ void inject_barriers(uint8_t* data, const char* lib) {
     }
     auto* g = reinterpret_cast<Group*>(grp->first) + nOld;
     for (int k = 0; k < n; ++k) g[k] = Group{runs[k].def, runs[k].batch, runs[k].start, runs[k].count, -1, 0, 0};
+    note_our_groups(data, nOld, g, n);
     {
         std::lock_guard<std::mutex> l(g_barrierLock);
         g_barrierData.insert(data);
@@ -664,13 +805,21 @@ void inspect_and_inject(uint8_t* data) {
         MsvcVector* iv   = vec_at(b + B_INSTANCES);
         int cnt          = (int)iv->count(INSTANCE_SIZE);
         if (cnt == 0 || !name_selected(name)) continue;
+        bool skip    = *g_skipModels && list_match(g_skipModels, name);
+        bool bush    = !skip && g_bushDef > 0 && *g_bushModels && list_match(g_bushModels, name);
         float factor = model_size_factor(name);
+        if (g_debug) {
+            std::lock_guard<std::mutex> l(g_seenLock);
+            if (g_seenModels.insert(name).second)
+                logf("tree model %s: %s, size %.2f (%d here)", name, skip ? "left solid" : bush ? "bush" : "tree", factor, cnt);
+        }
+        if (skip) continue;
         for (int j = 0; j < cnt; ++j) {
             alignas(16) float m[16];
             float scale = 1.0f;
             decode(data, m, iv->first + j * INSTANCE_SIZE, &scale);
             float size = factor * scale;
-            int tier   = size_tier(size);
+            int tier   = bush ? BUSH_TIER : size_tier(size);
             if (g_filterCollision >= 2) trunk_add(m[12], m[13], m[14], size);
             if (n > 0 && runs[n - 1].batch == (int)i && runs[n - 1].tier == tier) runs[n - 1].count++;
             else if (n < 4096) runs[n++] = Run{(int)i, j, 1, tier};
@@ -687,9 +836,11 @@ void inspect_and_inject(uint8_t* data) {
     }
     auto* g = reinterpret_cast<Group*>(grp->first);
     for (int k = 0; k < n; ++k)
-        g[k] = Group{g_sizeTiers ? CLONE_BASE + runs[k].tier
-                                 : (tier_size(runs[k].tier) >= g_lumberjackMinSize - 0.01f ? g_bigTreeDef : g_treeDef),
+        g[k] = Group{runs[k].tier == BUSH_TIER ? g_bushDef
+                     : g_sizeTiers ? CLONE_BASE + runs[k].tier
+                                   : (tier_size(runs[k].tier) >= g_lumberjackMinSize - 0.01f ? g_bigTreeDef : g_treeDef),
                      runs[k].batch, runs[k].start, runs[k].count, -1, 0, 0};
+    note_our_groups(data, 0, g, n);
     {
         std::vector<uint8_t> tiers;
         for (int k = 0; k < n; ++k) tiers.insert(tiers.end(), (size_t)runs[k].count, (uint8_t)runs[k].tier);
@@ -732,6 +883,7 @@ void d_cellAdd(uint8_t* mgr, uint8_t* msg) {
         const char* name = "";
         if (prov && *reinterpret_cast<uintptr_t*>(prov) == g_base + RVA_MODELS_VTABLE) {
             uint8_t* data = *reinterpret_cast<uint8_t**>(prov + 0xF8);
+            translate_groups(mgr, data);   // into this map's definition numbers
             if (is_barrier_data(data)) mark_barrier_proc(*reinterpret_cast<int32_t*>(prov + 0x58));
         }
         if (is_tree_provider(prov, &name)) {
@@ -1259,32 +1411,52 @@ LogCandidate g_poleLook{97, 4};           // and the falling telephone pole
 // and tree pieces fall back on the first of these whose models are loaded where they break.
 LogCandidate g_lookAlts[8] = {{97, 4}, {262, 4}, {98, 4}, {263, 4}};
 int g_nLookAlts = 4;
-int g_treeAlts[8] = {97, 262, 98, 263};
-int g_nTreeAlts = 4;
 bool model_resident(int model);
 bool def_resident(uint8_t* table, int def);
 char g_logModelScale[256] = "948:0.85/0.4";   // LogModelScale: "model:length/thickness,..." extra per-model factors
 // A stand-in model's size relative to the preferred one, from LogModelScale ("model:length/thickness").
-void look_factors(int /*want*/, int got, float* lenK, float* thickK) {
+// a look's definition on this map (def 0xFFFE: this map hasn't got it)
+LogCandidate nlc(uint8_t* table, LogCandidate c) {
+    if (c.def == 0xFFFF) return c;
+    int v = nd(table, c.def);
+    return LogCandidate{(uint16_t)(v < 0 ? 0xFFFE : v), c.piece};
+}
+// LogModelScale's model numbers are the mainland's; the models we know them as, on this map
+int native_model(uint8_t* table, int m) {
+    DefMap* dm = g_lastDefMap.load(std::memory_order_acquire);
+    if (!dm || dm->table != table || !dm->moved) return m;
+    static const struct { int model, def, piece; } known[] = {{948, 262, 4}};   // the olive trunk
+    for (const auto& k : known)
+        if (k.model == m) {
+            int d = nd(table, k.def);
+            return d < 0 ? -1 : o_defModel(table, ((uint32_t)k.piece << 16) | (uint32_t)d);
+        }
+    return -1;
+}
+void look_factors(uint8_t* table, int got, float* lenK, float* thickK) {
     *lenK = *thickK = 1.0f;
     for (const char* r = g_logModelScale; *r;) {
         while (*r == ' ' || *r == ',') ++r;
         if (!*r) break;
         int m = 0; float l = 1, t = 1;
-        if (sscanf(r, "%d:%f/%f", &m, &l, &t) >= 2 && m == got) { *lenK *= l; *thickK *= (t > 0 ? t : l); }
+        if (sscanf(r, "%d:%f/%f", &m, &l, &t) >= 2 && native_model(table, m) == got) { *lenK *= l; *thickK *= (t > 0 ? t : l); }
         while (*r && *r != ',') ++r;
     }
 }
-// the first look whose model is loaded (the preferred one first), or the preferred one
-LogCandidate pick_look(uint8_t* table, LogCandidate want) {
+// the first look whose model is loaded (the preferred one first), or the preferred one.
+// `want` is in this map's numbers; *loaded says whether the one returned is loaded.
+LogCandidate pick_look(uint8_t* table, LogCandidate want, bool* loaded = nullptr) {
+    if (loaded) *loaded = true;
     if (want.def == 0xFFFF || !g_loadedLooks) return want;
-    if (model_resident(o_defModel(table, ((uint32_t)want.piece << 16) | want.def))) return want;
+    if (want.def != 0xFFFE && model_resident(o_defModel(table, ((uint32_t)want.piece << 16) | want.def))) return want;
     for (int k = 0; k < g_nLookAlts; ++k) {
-        LogCandidate c = g_lookAlts[k];
+        LogCandidate c = nlc(table, g_lookAlts[k]);
+        if (c.def == 0xFFFE) continue;
         uint8_t* whole = o_defLookup(table, 0xFFFF0000u | c.def);
         if (!whole || !readable(whole, 0xA0) || c.piece >= *reinterpret_cast<uint32_t*>(whole + 0x94)) continue;
         if (model_resident(o_defModel(table, ((uint32_t)c.piece << 16) | c.def))) return c;
     }
+    if (loaded) *loaded = false;
     return want;
 }
 std::atomic<int> g_lookSwaps{0};
@@ -1392,12 +1564,28 @@ uint8_t* render_def_for(uint8_t* table, uint32_t mid, float scale, bool pole) {
 void spawn_log(const PendingLog& p) {
     uint8_t* mgr   = p.mgr;
     uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
-    uint32_t id    = ((uint32_t)p.c.piece << 16) | p.c.def;
+    // this map's numbers for the log's own piece and the looks it's drawn with
+    const LogCandidate poleLook = nlc(table, g_poleLook), logModel = nlc(table, g_logModel);
+    LogCandidate lc = nlc(table, p.c);
+    if (lc.def == 0xFFFE) {
+        // the piece that's normally its body (the wooden pylon's pole, 28:3) isn't on this map
+        // (Storm Island): the trunk it's drawn with is its body instead
+        LogCandidate want = p.pole ? poleLook : logModel;
+        LogCandidate look = want.def != 0xFFFF ? pick_look(table, want) : want;
+        static std::atomic<int> nm{0};
+        if (look.def >= 0xFFFE) {
+            if (++nm <= 10) logf("%s %d: definition %u isn't on this map, nor a trunk to use instead; left out", p.pole ? "pole" : "log", p.n, p.c.def);
+            return;
+        }
+        if (++nm <= 3) dlogf("%s %d: definition %u isn't on this map; %u:%u is its body instead", p.pole ? "pole" : "log", p.n, p.c.def, look.def, look.piece);
+        lc = look;
+    }
+    uint32_t id    = ((uint32_t)lc.piece << 16) | lc.def;
     // the definition and piece must exist
-    uint8_t* whole = o_defLookup(table, 0xFFFF0000u | p.c.def);
-    if (!whole || *reinterpret_cast<uintptr_t*>(whole) != g_base + 0x2EB5BD8) { dlogf("log %d: %u is not a definition", p.n, p.c.def); return; }
-    if (p.c.piece != 0xFFFF && p.c.piece >= *reinterpret_cast<uint32_t*>(whole + 0x94)) {
-        dlogf("log %d: definition %u has no piece %u", p.n, p.c.def, p.c.piece);
+    uint8_t* whole = o_defLookup(table, 0xFFFF0000u | lc.def);
+    if (!whole || *reinterpret_cast<uintptr_t*>(whole) != g_base + 0x2EB5BD8) { dlogf("log %d: %u is not a definition", p.n, lc.def); return; }
+    if (lc.piece != 0xFFFF && lc.piece >= *reinterpret_cast<uint32_t*>(whole + 0x94)) {
+        dlogf("log %d: definition %u has no piece %u", p.n, lc.def, lc.piece);
         return;
     }
     // free slot: the set at mgr+0x508 (value at node+0x1C), else recycle the farthest loose piece
@@ -1439,31 +1627,29 @@ void spawn_log(const PendingLog& p) {
     if (p.pole) {
         // a pole: drawn with PoleModel (the apple trunk's bark by default), with a copy of that
         // piece's definition whose culling radius covers the stretch
-        LogCandidate look = pick_look(table, g_poleLook);
-        uint32_t mid = look.def != 0xFFFF ? ((uint32_t)look.piece << 16) | look.def : id;
+        LogCandidate look = pick_look(table, poleLook);
+        uint32_t mid = look.def < 0xFFFE ? ((uint32_t)look.piece << 16) | look.def : id;
         model = o_defModel(table, mid);
-        look_factors(o_defModel(table, ((uint32_t)g_poleLook.piece << 16) | g_poleLook.def), model, &lenK, &thickK);
+        look_factors(table, model, &lenK, &thickK);
         renderDef = render_def_for(table, mid, std::max(p.length * lenK, p.thick * thickK) + 1.0f, true);
         g_poleRenderDef.store(renderDef);
-        if (look.def != g_poleLook.def || look.piece != g_poleLook.piece) {
+        if (look.def != poleLook.def || look.piece != poleLook.piece) {
             int k = ++g_lookSwaps;
-            if (k <= 20) dlogf("pole %d: model %d (%u:%u) isn't loaded here; drawn with %d (%u:%u) instead", p.n,
-                              o_defModel(table, ((uint32_t)g_poleLook.piece << 16) | g_poleLook.def), g_poleLook.def, g_poleLook.piece, model,
-                              look.def, look.piece);
+            if (k <= 20) dlogf("pole %d: %u:%u isn't loaded here; drawn with model %d (%u:%u) instead", p.n, poleLook.def, poleLook.piece,
+                              model, look.def, look.piece);
         }
-    } else if (g_logModel.def != 0xFFFF) {
-        LogCandidate look = pick_look(table, g_logModel);
+    } else if (logModel.def != 0xFFFF && pick_look(table, logModel).def < 0xFFFE) {
+        LogCandidate look = pick_look(table, logModel);
         uint32_t mid = ((uint32_t)look.piece << 16) | look.def;
-        int want = o_defModel(table, ((uint32_t)g_logModel.piece << 16) | g_logModel.def), got = o_defModel(table, mid);
-        look_factors(want, got, &lenK, &thickK);
+        int got = o_defModel(table, mid);
+        look_factors(table, got, &lenK, &thickK);
         renderDef = render_def_for(table, mid, std::max(std::max(g_logLength, g_logLengthMax) * lenK, g_logThickness * thickK) + 1.0f, false);
         if (renderDef) {
             g_logRenderDef.store(renderDef);
             model = got;
-            if (look.def != g_logModel.def || look.piece != g_logModel.piece) {
+            if (look.def != logModel.def || look.piece != logModel.piece) {
                 int k = ++g_lookSwaps;
-                if (k <= 20) dlogf("log %d: model %d (%u:%u) isn't loaded here; drawn with %d (%u:%u) instead", p.n,
-                                  o_defModel(table, ((uint32_t)g_logModel.piece << 16) | g_logModel.def), g_logModel.def, g_logModel.piece,
+                if (k <= 20) dlogf("log %d: %u:%u isn't loaded here; drawn with model %d (%u:%u) instead", p.n, logModel.def, logModel.piece,
                                   model, look.def, look.piece);
             }
         }
@@ -1496,7 +1682,7 @@ void spawn_log(const PendingLog& p) {
     }
     int total = g_logsSpawned.fetch_add(1) + 1;
     dlogf("log %d: spawned %u:%u (model %d, mass %.2f, radius %.2f, stretched %.2f long) in slot %d at (%.1f, %.1f, %.1f); %d logs so far", p.n,
-         p.c.def, p.c.piece, model, *reinterpret_cast<float*>(o_defLookup(table, id) + 0x9C),
+         lc.def, lc.piece, model, *reinterpret_cast<float*>(o_defLookup(table, id) + 0x9C),
          *reinterpret_cast<float*>(o_defLookup(table, id) + 0x98), p.length, slot, pos[0], pos[1], pos[2], total);
 }
 
@@ -1548,20 +1734,23 @@ void d_breakPieces(uint8_t* mgr, uint8_t* obj) {
     __try {
         uint32_t id = *reinterpret_cast<uint32_t*>(obj + 0x124);
         int def = (int)(id & 0xFFFF);
-        bool tree = (id >> 16) == 0xFFFF && (def == g_treeDef || def == g_bigTreeDef || (def >= CLONE_BASE && def < CLONE_BASE + NUM_TIERS));
-        for (int k = 0; k < g_nTreeAlts && !tree; ++k) tree = (id >> 16) == 0xFFFF && def == g_treeAlts[k];
         uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
+        // this map's numbers for the trees
+        int treeDef = table ? tree_def(table, false) : g_treeDef, bigDef = table ? tree_def(table, true) : g_bigTreeDef;
+        bool tree = (id >> 16) == 0xFFFF && (def == treeDef || def == bigDef || (def >= CLONE_BASE && def < CLONE_BASE + NUM_TIERS));
+        for (int k = 0; k < g_nTreeAlts && !tree && table; ++k) tree = (id >> 16) == 0xFFFF && def == nd(table, g_treeAlts[k]);
         if (tree && table) {
-            int pieceDef = def >= CLONE_BASE ? g_treeDef : def;   // tiered copies break into the tree definition's pieces
+            int pieceDef = def >= CLONE_BASE ? treeDef : def;   // tiered copies break into the tree definition's pieces
             if (!def_resident(table, pieceDef)) {
                 for (int k = 0; k < g_nTreeAlts; ++k) {
-                    if (g_treeAlts[k] == pieceDef || !def_resident(table, g_treeAlts[k])) continue;
+                    int alt = nd(table, g_treeAlts[k]);
+                    if (alt < 0 || alt == pieceDef || !def_resident(table, alt)) continue;
                     keep = id;
-                    *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (uint32_t)g_treeAlts[k];
+                    *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (uint32_t)alt;
                     swapped = true;
                     int n = ++g_treeSwaps;
                     if (n <= 20 || n % 100 == 0)
-                        dlogf("tree pieces: definition %d isn't loaded here; broke as %d instead (%d so far)", pieceDef, g_treeAlts[k], n);
+                        dlogf("tree pieces: definition %d isn't loaded here; broke as %d instead (%d so far)", pieceDef, alt, n);
                     break;
                 }
                 if (!swapped) {
@@ -2032,8 +2221,8 @@ void learn_tri_convention(uint8_t** tris, uint8_t** verts, int n) {
                 g_triConv.store(1);
                 logf("triangle normals learned: sign %+.0f, w %s; solid pylons are on", g_triSign, g_triW == 0 ? "0" : g_triW == 1 ? "d" : "-d");
             } else {
-                g_triConv.store(-1);
-                logf("triangle normals: no clear convention; solid pylons stay off");
+                    g_triConv.store(-1);
+                    logf("triangle normals: no clear convention; solid pylons stay off");
             }
         }
     }
@@ -2431,6 +2620,17 @@ void d_onCollision(uint8_t* obj, void* contact) {
             }
             float loss = 0, before_mph = 0, after_mph = 0;
             float carVel[4] = {0, 0, 0, 0};
+            uint8_t* defTable = *reinterpret_cast<uint8_t**>(*reinterpret_cast<uint8_t**>(obj + 0x40) + 0x4C8);
+            if (g_bushDef > 0 && (int)lo == nd(defTable, g_bushDef)) {
+                // a bush or crop: its own puff and sound come with BushDef; no log, no Lumberjack
+                apply_speed_loss(contact, size, &loss, &before_mph, &after_mph, carVel, g_bushSpeedLoss);
+                if (*g_bushEffects) spawn_effects(*reinterpret_cast<uint8_t**>(obj + 0x40), g_bushEffects, x, y, z, carVel);
+                static std::atomic<int> nb{0};
+                int k = ++nb;
+                if (k <= 200)
+                    dlogf("bush broke: proc=%d child=%d at (%.1f, %.1f, %.1f); speed %.0f -> %.0f mph (-%.0f%%); %d so far", proc,
+                         *reinterpret_cast<int32_t*>(obj + 0xC4), x, y, z, before_mph, after_mph, loss * 100, k);
+            } else {
             apply_speed_loss(contact, size, &loss, &before_mph, &after_mph, carVel);
             {
                 uint8_t* mgr = *reinterpret_cast<uint8_t**>(obj + 0x40);
@@ -2445,6 +2645,7 @@ void d_onCollision(uint8_t* obj, void* contact) {
                         dlogf("Wreckage RetriggerDelay is now %.2f", *reinterpret_cast<float*>(d + 0x24));
             dlogf("tree broke: size %.2f proc=%d child=%d state %d->%d at (%.1f, %.1f, %.1f); speed %.0f -> %.0f mph (-%.0f%%); %d broken so far",
                  size, proc, *reinterpret_cast<int32_t*>(obj + 0xC4), before, after, x, y, z, before_mph, after_mph, loss * 100, g_nBroken.load());
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -2470,9 +2671,18 @@ const char* const DEFAULT_INI =
     "LumberjackMinSize=1.6\r\n"
     "BigTreeEffects=Break_WoodDust,Break_Wood\r\n"
     "\r\n"
+    "; ---- bushes and crops ----\r\n"
+    "; models whose name contains one of these flatten like the game's own bushes: a small puff of leaves,\r\n"
+    "; no log, no Lumberjack (empty = they break like trees)\r\n"
+    "BushModels=Bush_,Crop_\r\n"
+    "; share of your speed a bush takes\r\n"
+    "BushSpeedLoss=0.04\r\n"
+    "; models whose name contains one of these stay solid, as without the mod\r\n"
+    "SkipModels=\r\n"
+    "\r\n"
     "; ---- logs: a log thrown out of each broken tree ----\r\n"
     "Logs=1\r\n"
-    "; trees smaller than this don't throw one (bushes are about 0.5)\r\n"
+    "; trees smaller than this don't throw one (bushes never do)\r\n"
     "LogMinSize=0.4\r\n"
     "; log size, as multiples of the model's own: length and thickness. Bigger trees throw longer logs,\r\n"
     "; kept between LogLengthMin and LogLengthMax\r\n"
@@ -2571,6 +2781,14 @@ void load_settings() {
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bigTreeEffects, sizeof g_bigTreeEffects, nullptr, nullptr);
     GetPrivateProfileStringW(L"WreckingBall", L"TreeEffects", L"", big, 512, ini.c_str());
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_treeEffects, sizeof g_treeEffects, nullptr, nullptr);
+    GetPrivateProfileStringW(L"WreckingBall", L"BushModels", L"Bush_,Crop_", big, 512, ini.c_str());
+    WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bushModels, sizeof g_bushModels, nullptr, nullptr);
+    GetPrivateProfileStringW(L"WreckingBall", L"SkipModels", L"", big, 512, ini.c_str());
+    WideCharToMultiByte(CP_UTF8, 0, big, -1, g_skipModels, sizeof g_skipModels, nullptr, nullptr);
+    GetPrivateProfileStringW(L"WreckingBall", L"BushEffects", L"", big, 512, ini.c_str());
+    WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bushEffects, sizeof g_bushEffects, nullptr, nullptr);
+    g_bushDef       = GetPrivateProfileIntW(L"WreckingBall", L"BushDef", 110, ini.c_str());
+    g_bushSpeedLoss = getf(L"BushSpeedLoss", 0.04f);
     g_barriers          = GetPrivateProfileIntW(L"WreckingBall", L"Barriers", 1, ini.c_str());
     g_barrierSkipEvents = GetPrivateProfileIntW(L"WreckingBall", L"BarrierSkipEvents", 1, ini.c_str());
     g_barrierSpeedLoss  = getf(L"BarrierSpeedLoss", 0.04f);
@@ -2737,6 +2955,41 @@ void mods_row_changed(void* user, const char* key, int value) {
     logf("%s set to %d on the Mods page%s", key, value, r->restart ? " (from the next start)" : "");
 }
 
+// The slowdown numbers, as sliders (platform 2.4.0 / API 5). They apply straight away.
+struct ModsSlider {
+    const char* key;      // also the ini key
+    const char* label;
+    const char* description;
+    float* value;
+    float min, max, step, scale;
+    int decimals;
+};
+const ModsSlider kModsSliders[] = {
+    {"SpeedLoss", "Tree slowdown", "How much of your speed a normal-sized tree takes, in percent. Bigger trees take more, smaller ones less.",
+     &g_speedLoss, 0.0f, 0.40f, 0.01f, 100.0f, 0},
+    {"SpeedLossMax", "Biggest tree slowdown", "The most of your speed any one tree can take, in percent, however big it is.",
+     &g_speedLossMax, 0.0f, 0.90f, 0.01f, 100.0f, 0},
+    {"SpeedLossExponent", "Tree size effect",
+     "How much more big trees slow you down than small ones. 0 = every tree the same, 1 = in proportion to size, higher = big trees much more.",
+     &g_speedLossExponent, 0.0f, 3.0f, 0.1f, 1.0f, 1},
+    {"BushSpeedLoss", "Bush slowdown", "How much of your speed a bush, hedge or crop takes, in percent.", &g_bushSpeedLoss, 0.0f, 0.20f, 0.01f,
+     100.0f, 0},
+    {"BarrierSpeedLoss", "Fence slowdown", "How much of your speed a fence, railing or piece of clutter takes, in percent.", &g_barrierSpeedLoss,
+     0.0f, 0.30f, 0.01f, 100.0f, 0},
+    {"PoleSpeedLoss", "Telephone pole slowdown", "How much of your speed a telephone pole takes, in percent.", &g_poleSpeedLoss, 0.0f, 0.50f,
+     0.01f, 100.0f, 0},
+};
+
+void mods_slider_changed(void* user, const char* key, float value) {
+    const ModsSlider* r = static_cast<const ModsSlider*>(user);
+    *r->value           = value;
+    wchar_t k[64], v[32];
+    MultiByteToWideChar(CP_UTF8, 0, key, -1, k, 64);
+    swprintf(v, 32, L"%.4g", (double)value);
+    WritePrivateProfileStringW(L"WreckingBall", k, v, (g_dir + L"\\WreckingBall.ini").c_str());
+    logf("%s set to %.4g on the Mods page", key, (double)value);
+}
+
 void add_mods_rows() {
     if (g_api->api_version < 4) return;   // an older platform: no Mods page
     for (const ModsRow& r : kModsRows) {
@@ -2749,6 +3002,24 @@ void add_mods_rows() {
         s.needs_restart = r.restart;
         s.on_change     = mods_row_changed;
         s.user          = const_cast<ModsRow*>(&r);
+        g_api->add_setting(g_mod, &s);
+    }
+    if (g_api->api_version < 5) return;   // sliders came with platform 2.4.0
+    for (const ModsSlider& r : kModsSliders) {
+        FH2Setting s{};
+        s.size          = sizeof s;
+        s.key           = r.key;
+        s.label         = r.label;
+        s.description   = r.description;
+        s.kind          = FH2_SETTING_SLIDER;
+        s.min           = r.min;
+        s.max           = r.max;
+        s.step          = r.step;
+        s.slider_value  = *r.value;
+        s.display_scale = r.scale;
+        s.decimals      = r.decimals;
+        s.on_slide      = mods_slider_changed;
+        s.user          = const_cast<ModsSlider*>(&r);
         g_api->add_setting(g_mod, &s);
     }
 }

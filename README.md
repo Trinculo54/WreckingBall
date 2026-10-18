@@ -6,7 +6,7 @@ It's a single DLL. The game's files are never touched, so removing it puts every
 
 ## Features
 
-**Trees and bushes.** Every tree and bush in the open world breaks when you hit it, using the game's own smashable tree physics, so it sounds and looks like the handful of breakable trees the game already had. Bigger trees slow you down more than small ones, and the biggest count as log piles, so they give you Lumberjack skill points. They also throw wood splinters and dust on top of the usual burst of leaves.
+**Trees and bushes.** Every tree and bush in the open world breaks when you hit it, using the game's own smashable tree physics, so it sounds and looks like the handful of breakable trees the game already had. Bigger trees slow you down more than small ones, and the biggest count as log piles, so they give you Lumberjack skill points. They also throw wood splinters and dust on top of the usual burst of leaves. Bushes, hedges and crops flatten like the game's own breakable bushes instead: a small puff of leaves, with no log and only a light slowdown.
 
 **Logs.** Every broken tree throws a log, sized to the tree it came from, that tumbles away from the car and rolls to a stop.
 
@@ -20,7 +20,7 @@ It's a single DLL. The game's files are never touched, so removing it puts every
 
 **Debris clean-up.** Broken pieces fade out after 45 seconds, or once you're 120 m away, so the world doesn't fill up with wreckage.
 
-**Switches in the game.** Pause > Settings gets a MODS tile with WreckingBall's main switches: breakable trees, logs, fences and railings, roadside clutter, falling telephone poles, solid concrete pylons and debris clean-up. Logs, poles, pylons and clean-up change straight away. Trees, fences and clutter are added to the world as each area loads, so they take a restart, and the game offers to restart for you when you leave the page. Every change is saved to `WreckingBall.ini`.
+**Switches in the game.** Pause > Settings gets a MODS tile with WreckingBall's main switches: breakable trees, logs, fences and railings, roadside clutter, falling telephone poles, solid concrete pylons and debris clean-up. Logs, poles, pylons and clean-up change straight away. Trees, fences and clutter are added to the world as each area loads, so they take a restart, and the game offers to restart for you when you leave the page. Under the switches are sliders for how much each thing slows you down: trees, the biggest trees, how much more big trees take than small ones, bushes, fences and telephone poles. They apply as you move them. Every change is saved to `WreckingBall.ini`.
 
 ## Install
 
@@ -34,7 +34,7 @@ When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO
 
 ### Using it with other FH2 mods
 
-`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, which is the one in its zip. The MODS page in the game comes with platform 2.3.0; on 2.2 everything else works and the switches are in the ini only.
+`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, which is the one in its zip. The MODS page in the game comes with platform 2.3.0 and its sliders with 2.4.0; on an older platform everything else works and those settings are in the ini only.
 
 ## Settings
 
@@ -47,8 +47,11 @@ The main switches are in the game, under Pause > Settings > MODS (see above). Ev
 | `SpeedLossMax` | `0.45` | The most a single tree can take. |
 | `LumberjackMinSize` | `1.6` | Trees at least this big (1 = a normal tree) count as log piles for Lumberjack and throw splinters. |
 | `BigTreeEffects` | `Break_WoodDust,Break_Wood` | Extra break effects for big trees, from the game's own list. Empty = none. |
+| `BushModels` | `Bush_,Crop_` | Models whose name contains one of these flatten like the game's own bushes: a small puff of leaves, no log, no Lumberjack. Empty = they break like trees, as in 1.1. |
+| `BushSpeedLoss` | `0.04` | Share of your speed a bush takes. |
+| `SkipModels` | (empty) | Models whose name contains one of these stay solid. With `Debug=1` the log lists every tree and bush model as it loads, with how it was sorted. |
 | `Logs` | `1` | `0` turns the logs off. |
-| `LogMinSize` | `0.4` | Trees smaller than this don't throw a log. Bushes are about 0.5. |
+| `LogMinSize` | `0.4` | Trees smaller than this don't throw a log. Bushes never do. |
 | `LogLength`, `LogThickness` | `3.0`, `4.5` | Log size, as multiples of the trunk model's own size. Bigger trees throw longer logs, between `LogLengthMin` and `LogLengthMax`. |
 | `LogModelScale` | `948:0.85/0.4` | Size correction for the olive trunk that stands in for the apple trunk away from the orchards (see below). |
 | `Barriers` | `1` | `0` keeps fences and railings solid. |
@@ -82,7 +85,8 @@ Delete `fh2-mods\WreckingBall.dll` and `fh2-mods\WreckingBall.ini`. The next tim
 ## How it works
 
 FH2 places its trees, fences and clutter as "procedurals", big batches of instances read from the track data, and only the ones listed in a procedural's smashable groups can break. When the game loads a procedural, WreckingBall adds groups of its own:
-- **trees and bushes:** the game's breakable apple tree definitions;
+- **trees:** the game's breakable apple tree definitions;
+- **bushes and crops:** the game's flattening bush (`GEN_OBJ_Bush_Flatten`);
 - **fences and railings:** whichever breakable fence the game already has that matches the model's name;
 - **clutter:** the breakable version of the same object from elsewhere in the game.
 
