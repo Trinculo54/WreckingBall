@@ -1,5 +1,5 @@
 // WreckingBall: FH6-style destruction for Forza Horizon 2 on PC (Azimuth), as a single
-// fh2-mods DLL on the FH2 Mod Platform. Nothing in the game's files is changed; it all
+// FH2ML v4 mod (mods\wreckingball). Nothing in the game's files is changed; it all
 // happens through hooks on the 24 Nov 2015 build.
 //
 //  - Trees and bushes: every procedural tree gets a smashable group (an apple or olive
@@ -14,7 +14,7 @@
 //  - Debris clean-up, and model fallbacks where the apple tree isn't streamed in.
 //
 // Notes on the game code each part relies on are next to it.
-#include "fh2mod.h"
+#include "FH2ML_v4.h"
 
 #include <windows.h>
 
@@ -27,6 +27,9 @@
 #include <cstdlib>
 #include <cwchar>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <initializer_list>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -36,9 +39,11 @@
 
 namespace {
 
-const FH2ModApi* g_api = nullptr;
-FH2Mod* g_mod          = nullptr;
-uintptr_t g_base       = 0;
+const FH2ML_Services_v4* g_api = nullptr;
+FH2ML_Mod* g_mod               = nullptr;
+uintptr_t g_base               = 0;
+std::wstring g_modDir;    // mods\wreckingball: the installed files, replaced on every update (read-only)
+std::wstring g_dataDir;   // FH2ML\data\wreckingball: WreckingBall.ini, the log, the defs dump; kept across updates
 
 // ---- settings ---------------------------------------------------------------
 int g_inject      = 1;
@@ -347,7 +352,7 @@ void dump_defs(uint8_t* table) {
     if (!g_dumpDefs || g_defsDumped.exchange(1)) return;
     __try {
         uint8_t** list = *reinterpret_cast<uint8_t***>(table + 8);
-        FILE* f = _wfopen((std::wstring(g_api->azimuth_dir) + L"\\fh2-mods\\WreckingBall-defs.txt").c_str(), L"w");
+        FILE* f = _wfopen((g_dataDir + L"\\WreckingBall-defs.txt").c_str(), L"w");
         if (!f) return;
         fprintf(f, "index | name (from the audio list) | mass | radius | breakSpeedMph | model | type/effect | pieces\n");
         int found = 0, misses = 0;
@@ -2123,7 +2128,7 @@ void d_breakPieces(uint8_t* mgr, uint8_t* obj) {
 }
 int g_logStretch = 1, g_logProbe = 0;
 
-// ---- loose fences drawn with their own model (platform 2.6.0 / API 7) ------------------------
+// ---- loose fences drawn with their own model (an instruction hook) ---------------------------
 // A breakable with no pieces (a fence, most clutter) breaks off as a fresh copy of itself, and
 // BreakIntoPieces draws that copy with its definition's model (0x1412CD300, then the bind at
 // 0x14036AEC0). A fence made breakable by a name rule borrows another fence's definition, so the
@@ -2198,7 +2203,7 @@ int procedural_model(uint8_t* tp, uint8_t* mgr, uint8_t* obj, const char** name)
     uint64_t R = srd<uint64_t>(b + 0x50), E = R ? srd<uint64_t>(R) : 0, I = E ? srd<uint64_t>(E + 0x10) : 0;
     return I ? placed_model(tp, srd<int32_t>(I)) : -1;
 }
-void on_whole_model(FH2Context* c, void*) {
+void on_whole_model(FH2ML_Registers* c, void*) {
     if (!g_ownModels) return;
     uint8_t* obj = reinterpret_cast<uint8_t*>(c->r15);
     uint8_t* mgr = reinterpret_cast<uint8_t*>(c->r14);
@@ -3281,9 +3286,8 @@ void d_onCollision(uint8_t* obj, void* contact) {
 }
 
 // ---- setup ------------------------------------------------------------------
-std::wstring g_dir; // fh2-mods folder
-
-// Written to fh2-mods\WreckingBall.ini the first time the mod runs. Every setting not listed
+// Written to FH2ML\data\wreckingball\WreckingBall.ini the first time the mod runs (unless
+// there was one to bring over from before FH2ML; see initialize). Every setting not listed
 // here keeps its built-in default (see the README for the advanced ones).
 const char* const DEFAULT_INI =
     "; WreckingBall settings. Changes here apply the next time you start the game. The main switches\r\n"
@@ -3351,17 +3355,16 @@ const char* const DEFAULT_INI =
     "DebrisDistance=120\r\n"
     "\r\n"
     "; ---- other ----\r\n"
-    "; 1 = the title screen says when a newer WreckingBall is out\r\n"
-    "CheckUpdates=1\r\n"
     "; 1 = detailed WreckingBall.log, F8 writes what's around the car to it, and the game's breakable\r\n"
     "; definitions go to WreckingBall-defs.txt (for reporting problems)\r\n"
     "Debug=0\r\n";
 
-int g_checkUpdates = 1;
 bool g_rowsOff = false;   // the world update couldn't be hooked
 
+std::wstring ini_path() { return g_dataDir + L"\\WreckingBall.ini"; }
+
 void load_settings() {
-    std::wstring ini = g_dir + L"\\WreckingBall.ini";
+    std::wstring ini = ini_path();
     if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
         if (FILE* f = _wfopen(ini.c_str(), L"wb")) {
             fputs(DEFAULT_INI, f);
@@ -3503,7 +3506,6 @@ void load_settings() {
     g_dumpDefs     = g_debug;
     g_logProbe     = g_debug;
     g_markEnabled  = g_debug;
-    g_checkUpdates = GetPrivateProfileIntW(L"WreckingBall", L"CheckUpdates", 1, ini.c_str());
     g_loadedLooks = GetPrivateProfileIntW(L"WreckingBall", L"LoadedModelFallback", 1, ini.c_str());
     g_ownModels   = GetPrivateProfileIntW(L"WreckingBall", L"OwnModels", 1, ini.c_str());
     g_poleOwnModel = GetPrivateProfileIntW(L"WreckingBall", L"PoleOwnModel", 1, ini.c_str());
@@ -3568,7 +3570,7 @@ bool code_matches(uintptr_t rva, const uint8_t* expect, size_t n) {
     return std::memcmp(reinterpret_cast<void*>(g_base + rva), expect, n) == 0;
 }
 
-// ---- the Mods page (Pause > Settings > MODS, platform 2.3.0 / API 4) ----------------------
+// ---- the Mods page (Pause > Settings > MODS) ----------------------------------------------
 // The main switches, as On/Off rows. A change is saved to WreckingBall.ini straight away.
 // Trees, fences and clutter are added to the world's breakables as each area loads, so they
 // take a restart; the rest switch on and off as you go.
@@ -3599,11 +3601,11 @@ void mods_row_changed(void* user, const char* key, int value) {
     wchar_t k[64], v[8];
     MultiByteToWideChar(CP_UTF8, 0, key, -1, k, 64);
     swprintf(v, 8, L"%d", value);
-    WritePrivateProfileStringW(L"WreckingBall", k, v, (g_dir + L"\\WreckingBall.ini").c_str());
+    WritePrivateProfileStringW(L"WreckingBall", k, v, ini_path().c_str());
     logf("%s set to %d on the Mods page%s", key, value, r->restart ? " (from the next start)" : "");
 }
 
-// The slowdown numbers, as sliders (platform 2.4.0 / API 5). They apply straight away.
+// The slowdown numbers, as sliders. They apply straight away.
 struct ModsSlider {
     const char* key;      // also the ini key
     const char* label;
@@ -3634,14 +3636,13 @@ void mods_slider_changed(void* user, const char* key, float value) {
     wchar_t k[64], v[32];
     MultiByteToWideChar(CP_UTF8, 0, key, -1, k, 64);
     swprintf(v, 32, L"%.4g", (double)value);
-    WritePrivateProfileStringW(L"WreckingBall", k, v, (g_dir + L"\\WreckingBall.ini").c_str());
+    WritePrivateProfileStringW(L"WreckingBall", k, v, ini_path().c_str());
     logf("%s set to %.4g on the Mods page", key, (double)value);
 }
 
 void add_mods_rows() {
-    if (g_api->api_version < 4) return;   // an older platform: no Mods page
     for (const ModsRow& r : kModsRows) {
-        FH2Setting s{};
+        FH2ML_Setting s{};
         s.size          = sizeof s;
         s.key           = r.key;
         s.label         = r.label;
@@ -3650,16 +3651,15 @@ void add_mods_rows() {
         s.needs_restart = r.restart;
         s.on_change     = mods_row_changed;
         s.user          = const_cast<ModsRow*>(&r);
-        g_api->add_setting(g_mod, &s);
+        g_api->AddSetting(g_mod, &s);
     }
-    if (g_api->api_version < 5) return;   // sliders came with platform 2.4.0
     for (const ModsSlider& r : kModsSliders) {
-        FH2Setting s{};
+        FH2ML_Setting s{};
         s.size          = sizeof s;
         s.key           = r.key;
         s.label         = r.label;
         s.description   = r.description;
-        s.kind          = FH2_SETTING_SLIDER;
+        s.kind          = FH2ML_SETTING_SLIDER;
         s.min           = r.min;
         s.max           = r.max;
         s.step          = r.step;
@@ -3668,12 +3668,12 @@ void add_mods_rows() {
         s.decimals      = r.decimals;
         s.on_slide      = mods_slider_changed;
         s.user          = const_cast<ModsSlider*>(&r);
-        g_api->add_setting(g_mod, &s);
+        g_api->AddSetting(g_mod, &s);
     }
 }
 
 DWORD WINAPI setup_thread(LPVOID) {
-    void* base = g_api->wait_for_code(0xFFFFFFFFu);
+    void* base = g_api->WaitForCode(0xFFFFFFFFu);
     if (!base) {
         logf("game code never became ready; nothing hooked");
         return 0;
@@ -3696,52 +3696,51 @@ DWORD WINAPI setup_thread(LPVOID) {
         !code_matches(RVA_TEMPLATE_QUERY, tq, sizeof tq) || !code_matches(RVA_HOLDER_LOAD, hl, sizeof hl) ||
         !code_matches(0x12CC010, dl, sizeof dl) || !code_matches(0x12CD300, dm, sizeof dm)) {
         logf("ERROR: game code doesn't look like the 24 Nov 2015 build; nothing hooked");
-        g_api->log(g_mod, "game code doesn't match; WreckingBall is off");
+        g_api->Log(g_mod, "game code doesn't match; WreckingBall is off");
         return 0;
     }
 
     bool ok = true;
-    ok &= g_api->hook_function(g_mod, "ProceduralModelsData::Serialize", reinterpret_cast<void*>(g_base + RVA_DESERIALIZE),
-                               reinterpret_cast<void*>(d_deserialize), reinterpret_cast<void**>(&o_deserialize)) != nullptr;
-    ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::AddCell", reinterpret_cast<void*>(g_base + RVA_CELL_ADD),
-                               reinterpret_cast<void*>(d_cellAdd), reinterpret_cast<void**>(&o_cellAdd)) != nullptr;
-    ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::SpawnCell", reinterpret_cast<void*>(g_base + RVA_CELL_SPAWN),
-                               reinterpret_cast<void*>(d_cellSpawn), reinterpret_cast<void**>(&o_cellSpawn)) != nullptr;
-    ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::MakeDynamic", reinterpret_cast<void*>(g_base + RVA_SWAP),
-                               reinterpret_cast<void*>(d_swap), reinterpret_cast<void**>(&o_swap)) != nullptr;
-    ok &= g_api->hook_function(g_mod, "CollObj definition lookup", reinterpret_cast<void*>(g_base + 0x12CC010),
-                               reinterpret_cast<void*>(d_defLookup), reinterpret_cast<void**>(&o_defLookup)) != nullptr;
-    ok &= g_api->hook_function(g_mod, "CollObj definition render model", reinterpret_cast<void*>(g_base + 0x12CD300),
-                               reinterpret_cast<void*>(d_defModel), reinterpret_cast<void**>(&o_defModel)) != nullptr;
+    ok &= g_api->HookFunction(g_mod, "ProceduralModelsData::Serialize", reinterpret_cast<void*>(g_base + RVA_DESERIALIZE),
+                              reinterpret_cast<void*>(d_deserialize), reinterpret_cast<void**>(&o_deserialize)) != nullptr;
+    ok &= g_api->HookFunction(g_mod, "CWorldCollObjMan::AddCell", reinterpret_cast<void*>(g_base + RVA_CELL_ADD),
+                              reinterpret_cast<void*>(d_cellAdd), reinterpret_cast<void**>(&o_cellAdd)) != nullptr;
+    ok &= g_api->HookFunction(g_mod, "CWorldCollObjMan::SpawnCell", reinterpret_cast<void*>(g_base + RVA_CELL_SPAWN),
+                              reinterpret_cast<void*>(d_cellSpawn), reinterpret_cast<void**>(&o_cellSpawn)) != nullptr;
+    ok &= g_api->HookFunction(g_mod, "CWorldCollObjMan::MakeDynamic", reinterpret_cast<void*>(g_base + RVA_SWAP),
+                              reinterpret_cast<void*>(d_swap), reinterpret_cast<void**>(&o_swap)) != nullptr;
+    ok &= g_api->HookFunction(g_mod, "CollObj definition lookup", reinterpret_cast<void*>(g_base + 0x12CC010),
+                              reinterpret_cast<void*>(d_defLookup), reinterpret_cast<void**>(&o_defLookup)) != nullptr;
+    ok &= g_api->HookFunction(g_mod, "CollObj definition render model", reinterpret_cast<void*>(g_base + 0x12CD300),
+                              reinterpret_cast<void*>(d_defModel), reinterpret_cast<void**>(&o_defModel)) != nullptr;
     if (*reinterpret_cast<uintptr_t*>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8) == g_base + 0xA81770)
-        ok &= g_api->hook_pointer(g_mod, "Skills::Destruction::Load", reinterpret_cast<void**>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_destructionLoad), reinterpret_cast<void**>(&o_destructionLoad)) != nullptr;
+        ok &= g_api->HookPointer(g_mod, "Skills::Destruction::Load", reinterpret_cast<void**>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8),
+                                 reinterpret_cast<void*>(d_destructionLoad), reinterpret_cast<void**>(&o_destructionLoad)) != nullptr;
     if (*reinterpret_cast<uintptr_t*>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8) == g_base + 0xA81930)
-        ok &= g_api->hook_pointer(g_mod, "Skills::Lumberjack::Load", reinterpret_cast<void**>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_lumberjackLoad), reinterpret_cast<void**>(&o_lumberjackLoad)) != nullptr;
+        ok &= g_api->HookPointer(g_mod, "Skills::Lumberjack::Load", reinterpret_cast<void**>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8),
+                                 reinterpret_cast<void*>(d_lumberjackLoad), reinterpret_cast<void**>(&o_lumberjackLoad)) != nullptr;
     if (*reinterpret_cast<uintptr_t*>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8) == g_base + 0xA80D90)
-        ok &= g_api->hook_pointer(g_mod, "Skills::SideSwipe::Load", reinterpret_cast<void**>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_sideswipeLoad), reinterpret_cast<void**>(&o_sideswipeLoad)) != nullptr;
+        ok &= g_api->HookPointer(g_mod, "Skills::SideSwipe::Load", reinterpret_cast<void**>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8),
+                                 reinterpret_cast<void*>(d_sideswipeLoad), reinterpret_cast<void**>(&o_sideswipeLoad)) != nullptr;
     static const uint8_t gp[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x48, 0x89, 0x48, 0x08, 0x55};   // GetPolys
     if (g_solidModels[0] && code_matches(0x12CC730, gp, sizeof gp))
-        ok &= g_api->hook_function(g_mod, "CollisionWorld::GetPolys", reinterpret_cast<void*>(g_base + 0x12CC730),
-                                   reinterpret_cast<void*>(d_getPolys), reinterpret_cast<void**>(&o_getPolys)) != nullptr;
+        ok &= g_api->HookFunction(g_mod, "CollisionWorld::GetPolys", reinterpret_cast<void*>(g_base + 0x12CC730),
+                                  reinterpret_cast<void*>(d_getPolys), reinterpret_cast<void**>(&o_getPolys)) != nullptr;
     else if (g_solidModels[0]) logf("solid pylons: game code doesn't match, off");
     static const uint8_t bp[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x50, 0x10, 0x48, 0x89, 0x48, 0x08, 0x55}; // break into pieces
     if (g_loadedLooks && code_matches(0x36AC80, bp, sizeof bp))
-        ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
-                                   reinterpret_cast<void*>(d_breakPieces), reinterpret_cast<void**>(&o_breakPieces)) != nullptr;
+        ok &= g_api->HookFunction(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
+                                  reinterpret_cast<void*>(d_breakPieces), reinterpret_cast<void**>(&o_breakPieces)) != nullptr;
     else if (g_loadedLooks) logf("tree piece fallback: game code doesn't match, off");
-    // Own models for loose fences: an instruction hook, so platform 2.6.0 (API 7) or later. Not
-    // part of `ok`: without it fences just keep the look of the definition they break as.
+    // Own models for loose fences: an instruction hook. Not part of `ok`: without it fences just
+    // keep the look of the definition they break as.
     static const uint8_t wm[] = {0x48, 0x8D, 0x4D, 0xC0, 0x48, 0x89, 0x4C, 0x24, 0x20};   // lea rcx,[rbp-40h]; mov [rsp+20h],rcx
-    if (g_ownModels && g_api->api_version >= 7 && code_matches(0x36AEAC, wm, sizeof wm)) {
-        if (!g_api->hook_instruction(g_mod, "BreakIntoPieces: the loose copy's model", reinterpret_cast<void*>(g_base + 0x36AEAC),
-                                     &on_whole_model, nullptr))
-            logf("own models: the platform didn't allow the hook (see platform.log); fences keep their stand-in's look");
+    if (g_ownModels && code_matches(0x36AEAC, wm, sizeof wm)) {
+        if (!g_api->HookInstruction(g_mod, "BreakIntoPieces: the loose copy's model", reinterpret_cast<void*>(g_base + 0x36AEAC),
+                                    &on_whole_model, nullptr))
+            logf("own models: FH2ML didn't allow the hook (see FH2ML\\logs\\FH2ML.log); fences keep their stand-in's look");
     } else if (g_ownModels) {
-        logf(g_api->api_version < 7 ? "own models: needs FH2 Mod Platform 2.6.0 or later; fences keep their stand-in's look"
-                                    : "own models: game code doesn't match, off");
+        logf("own models: game code doesn't match, off");
         g_ownModels = 0;
     }
     static const uint8_t mu[] = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55}; // CWorldCollObjMan update
@@ -3749,8 +3748,8 @@ DWORD WINAPI setup_thread(LPVOID) {
     // Logs, poles and debris clean-up all run from here, and each can be switched on and off
     // in the game (Pause > Settings > MODS), so it's hooked whatever they're set to now.
     if (code_matches(0x384C00, mu, sizeof mu) && code_matches(0x369690, so, sizeof so))
-        ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::Update", reinterpret_cast<void*>(g_base + 0x384C00),
-                                   reinterpret_cast<void*>(d_mgrUpdate), reinterpret_cast<void**>(&o_mgrUpdate)) != nullptr;
+        ok &= g_api->HookFunction(g_mod, "CWorldCollObjMan::Update", reinterpret_cast<void*>(g_base + 0x384C00),
+                                  reinterpret_cast<void*>(d_mgrUpdate), reinterpret_cast<void**>(&o_mgrUpdate)) != nullptr;
     else {
         logf("world update: game code doesn't match, logs, poles and debris clean-up are off");
         g_logs = g_poles = g_debrisCleanup = 0;
@@ -3759,23 +3758,23 @@ DWORD WINAPI setup_thread(LPVOID) {
     static const uint8_t nu[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x48, 0x20, 0x4C, 0x89, 0x40, 0x18}; // render node update
     if (g_logStretch && !g_rowsOff) {
         if (*reinterpret_cast<uintptr_t*>(g_base + 0x2EB8590 + 0x338) == g_base + 0x132B390 && code_matches(0x13A41E0, nu, sizeof nu)) {
-            ok &= g_api->hook_function(g_mod, "CTrackPresentation::BindCollObjInstanceToModel", reinterpret_cast<void*>(g_base + 0x132B390),
-                                       reinterpret_cast<void*>(d_tpBind), reinterpret_cast<void**>(&o_tpBind)) != nullptr;
-            ok &= g_api->hook_function(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
+            ok &= g_api->HookFunction(g_mod, "CTrackPresentation::BindCollObjInstanceToModel", reinterpret_cast<void*>(g_base + 0x132B390),
+                                      reinterpret_cast<void*>(d_tpBind), reinterpret_cast<void**>(&o_tpBind)) != nullptr;
+            ok &= g_api->HookFunction(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
                                            reinterpret_cast<void*>(d_nodeUpdate), reinterpret_cast<void**>(&o_nodeUpdate)) != nullptr;
         } else {
             logf("log stretching: game code doesn't match, off");
             g_logStretch = g_logProbe = 0;
         }
     }
-    ok &= g_api->hook_pointer(g_mod, "CWorldCollObj::OnCollision", reinterpret_cast<void**>(g_base + RVA_COLLOBJ_VTABLE),
-                              reinterpret_cast<void*>(d_onCollision), reinterpret_cast<void**>(&o_onCollision)) != nullptr;
-    ok &= g_api->hook_function(g_mod, "StreamedPhysics::CollisionInstance template load", reinterpret_cast<void*>(g_base + RVA_HOLDER_LOAD),
-                               reinterpret_cast<void*>(d_holderLoad), reinterpret_cast<void**>(&o_holderLoad)) != nullptr;
-    ok &= g_api->hook_function(g_mod, "StreamedPhysics collision template query", reinterpret_cast<void*>(g_base + RVA_TEMPLATE_QUERY),
-                               reinterpret_cast<void*>(d_templateQuery), reinterpret_cast<void**>(&o_templateQuery)) != nullptr;
-    if (!ok || !g_api->enable_hooks(g_mod, nullptr)) {
-        logf("ERROR: hooking failed (see platform.log)");
+    ok &= g_api->HookPointer(g_mod, "CWorldCollObj::OnCollision", reinterpret_cast<void**>(g_base + RVA_COLLOBJ_VTABLE),
+                             reinterpret_cast<void*>(d_onCollision), reinterpret_cast<void**>(&o_onCollision)) != nullptr;
+    ok &= g_api->HookFunction(g_mod, "StreamedPhysics::CollisionInstance template load", reinterpret_cast<void*>(g_base + RVA_HOLDER_LOAD),
+                              reinterpret_cast<void*>(d_holderLoad), reinterpret_cast<void**>(&o_holderLoad)) != nullptr;
+    ok &= g_api->HookFunction(g_mod, "StreamedPhysics collision template query", reinterpret_cast<void*>(g_base + RVA_TEMPLATE_QUERY),
+                              reinterpret_cast<void*>(d_templateQuery), reinterpret_cast<void**>(&o_templateQuery)) != nullptr;
+    if (!ok || !g_api->EnableHooks(g_mod, nullptr)) {
+        logf("ERROR: hooking failed (see FH2ML\\logs\\FH2ML.log)");
         return 0;
     }
     logf("on: trees %s, logs %s, fences and railings %s, roadside clutter %s, telephone poles %s, solid pylons %s, debris clean-up %s%s",
@@ -3785,31 +3784,67 @@ DWORD WINAPI setup_thread(LPVOID) {
     return 0;
 }
 
-} // namespace
+namespace fs = std::filesystem;
 
-FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
-    if (api->api_version < 3) return 1;
-    g_api = api;
-    FH2ModInfo info{};
-    info.size             = sizeof info;
-    info.name             = "WreckingBall";
-    info.version          = WB_VERSION;
-    info.github_repo      = "Trinculo54/WreckingBall";
-    info.platform_version = FH2MOD_PLATFORM_VERSION;
-    info.description      = "Lets you drive through the scenery like the later Horizon games: trees snap and throw logs, fences and railings burst apart, roadside clutter goes flying and telephone poles fall over. Festival fences and the barriers in front of crowds stay solid.";
-    g_dir = std::wstring(api->azimuth_dir) + L"\\fh2-mods";
+// Once: copies the platform-era files (a file, or a folder's contents) into the data
+// folder. Files already there win. A marker file remembers that it was done.
+void import_from_platform(const FH2ML_ModContext_v4* c,
+                          std::initializer_list<std::pair<const wchar_t*, const wchar_t*>> items) {
+    std::error_code e;
+    const fs::path data = c->data_directory, marker = data / L"imported-from-fh2-mods.txt";
+    if (fs::exists(marker, e)) return;
+    for (auto [from, to] : items) {
+        const fs::path src = fs::path(c->services->azimuth_directory) / from, dst = data / to;
+        if (!fs::exists(src, e)) continue;
+        fs::create_directories(fs::is_directory(src, e) ? dst : dst.parent_path(), e);
+        fs::copy(src, dst, fs::copy_options::recursive | fs::copy_options::skip_existing, e);
+    }
+    std::ofstream(marker) << "Copied from the FH2 Mod Platform's folders on the first launch under FH2ML.\n";
+}
+
+std::string utf8(const std::wstring& w) {
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n > 0 ? n : 0, '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+int initialize(const FH2ML_ModContext_v4* c, void*) {
+    g_api     = c->services;
+    g_mod     = c->mod;
+    g_modDir  = c->mod_directory;
+    g_dataDir = c->data_directory;
+    // The settings from before FH2ML (the log and the defs dump are written fresh anyway).
+    import_from_platform(c, {{L"fh2-mods\\WreckingBall.ini", L"WreckingBall.ini"}});
     load_settings();
-    info.check_updates    = g_checkUpdates;
-    g_mod                 = api->register_mod(&info);
-    if (!g_mod) return 1;
     g_trunkPool = static_cast<TrunkNode*>(VirtualAlloc(nullptr, sizeof(TrunkNode) * TRUNK_POOL, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     for (auto& h : g_trunkHead) h.store(-1);
     g_barInfo = static_cast<BarInfo*>(VirtualAlloc(nullptr, sizeof(BarInfo) * TRUNK_POOL, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    g_log = _wfopen((g_dir + L"\\WreckingBall.log").c_str(), L"w");
-    logf("WreckingBall %s", WB_VERSION);
-    api->log(g_mod, "logging to fh2-mods\\WreckingBall.log");
+    const std::wstring log = g_dataDir + L"\\WreckingBall.log";
+    g_log = _wfopen(log.c_str(), L"w");
+    logf("WreckingBall %s, installed in %s", WB_VERSION, utf8(g_modDir).c_str());
+    if (GetPrivateProfileIntW(L"WreckingBall", L"CheckUpdates", 1, ini_path().c_str()) == 0)
+        logf("CheckUpdates=0 in WreckingBall.ini isn't used any more: update checks are set in FH2ML\\config\\FH2ML.json");
+    g_api->Log(g_mod, ("logging to " + utf8(log)).c_str());
     add_mods_rows();
 
     if (HANDLE t = CreateThread(nullptr, 0, setup_thread, nullptr, 0, nullptr)) CloseHandle(t);
-    return 0;
+    return 1;
+}
+
+const FH2ML_ModAPI_v4 kDescriptor{
+    sizeof(FH2ML_ModAPI_v4), FH2ML_API_VERSION_V4, nullptr,
+    "WreckingBall",
+    WB_VERSION,
+    "Trinculo54/WreckingBall",
+    "Lets you drive through the scenery like the later Horizon games: trees snap and throw logs, fences and railings burst apart, roadside clutter goes flying and telephone poles fall over. Festival fences and the barriers in front of crowds stay solid.",
+    0,
+    initialize,
+    nullptr,
+    nullptr};
+
+} // namespace
+
+FH2ML_V4_EXPORT const FH2ML_ModAPI_v4* FH2ML_GetModAPI_v4(uint32_t host_version) {
+    return host_version == FH2ML_API_VERSION_V4 ? &kDescriptor : nullptr;
 }

@@ -1,0 +1,26 @@
+MIT License
+
+Copyright (c) 2026 Refilewski
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of the FH2ML SDK files in this directory (FH2ML.h, FH2ML_Adapter.h, FH2ML_DevKit.h, FH2ML_v3.h and
+FH2ML.external-tool.schema.json), to deal in those SDK files without restriction,
+including without limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of the SDK files,
+and to permit persons to whom the header files are furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the header files.
+
+THE HEADER FILES ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE HEADER FILES OR
+THE USE OR OTHER DEALINGS IN THE HEADER FILES.
+
+This license applies only to the SDK header files in this directory. It does
+not license the FH2ML loader, runtime, manager, scripts, documentation, or
+other repository contents.

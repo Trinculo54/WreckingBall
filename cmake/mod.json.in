@@ -1,0 +1,8 @@
+{
+  "id": "@WB_MOD_ID@",
+  "name": "WreckingBall",
+  "version": "@PROJECT_VERSION@",
+  "author": "Trinculo54",
+  "entry": "WreckingBall.dll",
+  "enabled": true
+}

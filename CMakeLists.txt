@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # Bump VERSION before tagging a release (the tag build checks they match).
-project(wreckingball VERSION 1.3.0 LANGUAGES C CXX RC)
+project(wreckingball VERSION 1.4.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,14 +21,16 @@ else()
     add_link_options(-static)
 endif()
 
-# The FH2 Mod Platform (git submodule): d3dcompiler_47.dll, shipped next
-# to azimuth.exe, and fh2mod.h.
-add_subdirectory(platform)
+# An FH2ML v4 mod (https://github.com/Refilewski/FH2ML): FH2ML loads it from
+# mods\wreckingball\ and provides every service it uses. FH2ML_v4.h is vendored
+# in third_party/fh2ml (MIT, see its LICENSE).
+set(WB_MOD_ID wreckingball)
 configure_file(cmake/version.h.in ${CMAKE_BINARY_DIR}/generated/fh2_version.h)
+# mod.json, from the same PROJECT_VERSION as the descriptor's WB_VERSION, so the two always match.
+configure_file(cmake/mod.json.in ${CMAKE_BINARY_DIR}/mod.json @ONLY)
 
-# The mod: fh2-mods\WreckingBall.dll
+# The mod: mods\wreckingball\WreckingBall.dll
 add_library(wreckingball SHARED src/wreckingball.cpp src/version.rc)
-target_include_directories(wreckingball PRIVATE src ${CMAKE_BINARY_DIR}/generated)
+target_include_directories(wreckingball PRIVATE src third_party/fh2ml ${CMAKE_BINARY_DIR}/generated)
 target_compile_definitions(wreckingball PRIVATE WB_VERSION="${PROJECT_VERSION}")
-target_link_libraries(wreckingball PRIVATE fh2mod_api)
 set_target_properties(wreckingball PROPERTIES OUTPUT_NAME WreckingBall PREFIX "")
