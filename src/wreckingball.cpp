@@ -3161,6 +3161,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     info.version          = WB_VERSION;
     info.github_repo      = "Trinculo54/WreckingBall";
     info.platform_version = FH2MOD_PLATFORM_VERSION;
+    info.description      = "Lets you drive through the scenery like the later Horizon games: trees snap and throw logs, fences and railings burst apart, roadside clutter goes flying and telephone poles fall over. Festival fences and the barriers in front of crowds stay solid.";
     g_dir = std::wstring(api->azimuth_dir) + L"\\fh2-mods";
     load_settings();
     info.check_updates    = g_checkUpdates;
