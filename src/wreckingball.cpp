@@ -397,6 +397,12 @@ void patch_big_def(uint8_t* table) {
 
 // render-only definition for logs drawn with another model (see spawn_log)
 constexpr uint32_t LOG_RENDER_DEF = 0xF0FF, POLE_RENDER_DEF = 0xF0FE;
+// A falling pole drawn with its own model gets a body of its own: a copy of a pole piece's
+// definition whose collision is one box the size of the pole (see pole_body_def), looked up
+// under this id for as long as the pole lives.
+constexpr uint32_t POLE_BODY_DEF = 0xF0FD;
+std::atomic<uint8_t*> g_poleBodyDef{nullptr};
+std::atomic<int> g_poleBodyModel{-1};   // the model its last pole was drawn with
 std::atomic<uint8_t*> g_logRenderDef{nullptr}, g_poleRenderDef{nullptr};
 
 uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
@@ -404,6 +410,10 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
     if (lo == POLE_RENDER_DEF) {
         if (uint8_t* d = g_poleRenderDef.load(std::memory_order_acquire)) return d;
         return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
+    }
+    if (lo == POLE_BODY_DEF) {
+        if (uint8_t* d = g_poleBodyDef.load(std::memory_order_acquire)) return d;
+        return o_defLookup(table, 0xFFFF0000u | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
     }
     if (lo == LOG_RENDER_DEF) {
         if (uint8_t* d = g_logRenderDef.load(std::memory_order_acquire)) return d;
@@ -425,6 +435,7 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
 
 int d_defModel(uint8_t* table, uint32_t id) {
     uint32_t lo = id & 0xFFFF;
+    if (lo == POLE_BODY_DEF && g_poleBodyModel.load(std::memory_order_relaxed) >= 0) return g_poleBodyModel.load(std::memory_order_relaxed);
     if (lo >= (uint32_t)CLONE_BASE && lo < (uint32_t)(CLONE_BASE + NUM_TIERS))
         return o_defModel(table, (id & 0xFFFF0000u) | (uint32_t)(tree_def(table, false) & 0xFFFF));
     return o_defModel(table, id);
@@ -1522,6 +1533,7 @@ int g_poleOwnModel = 1;   // PoleOwnModel: a falling pole is drawn with the pole
 // pole; the arched street light's 28:3 is only ~3 m, so a pole's ends went through the ground
 // and the car. Falls back on 28:3 where a map hasn't got it.
 LogCandidate g_poleBody{91, 0};
+int g_poleOwnBody = 1;   // PoleOwnBody: such a pole's body is a box the size of the pole (pole_body_def)
 std::mutex g_pendLock;
 PendingLog g_pend[16];
 int g_nPend = 0;
@@ -1639,6 +1651,52 @@ uint8_t* pole_own_def(uint8_t* table, uint32_t id, float half) {
     return d;
 }
 
+// A pole's own body: a copy of a pole piece's definition (CCollObjPhysicsDefinition, vtable
+// 0x142EB5BD8) whose collision is a single box the size of the pole, centred on the body.
+// A definition's collision is a list of shapes: +0x80 points to their pointers, +0x90 is how
+// many (serialised at 0x1412DCC80). A shape starts with its type (0 sphere, 1 box, 2 convex hull,
+// 4 point cloud) and flags (bit 1: it collides), and a box has a transform at +0x10 and half
+// extents at +0x50 (0x60 bytes). A rigid body takes its collision shapes from its definition each
+// time one is made (0x1412D2850, called for every spawn), so the copy's box is the pole's body.
+// The centre of mass is the body's own centre; the pole is drawn half a pole below it (see
+// d_nodeUpdate). One per half height, to a centimetre.
+uint8_t* pole_body_def(uint8_t* table, uint32_t srcId, float half) {
+    struct Entry { int h; uint8_t* def; };
+    static Entry cache[16];
+    static int n = 0;
+    const int hq = (int)std::lround(half * 100.0f);
+    for (int k = 0; k < n; ++k) if (cache[k].h == hq) return cache[k].def;
+    uint8_t* src = o_defLookup(table, srcId);
+    if (!src || !readable(src, DEF_SIZE) || *reinterpret_cast<uintptr_t*>(src) != g_base + 0x2EB5BD8 || n >= 16) return nullptr;
+    uint8_t flags = 0x05;   // collides (1), and 4 like the game's pieces
+    int sn = *reinterpret_cast<int32_t*>(src + 0x90);
+    uint8_t** sa = *reinterpret_cast<uint8_t***>(src + 0x80);
+    if (sn > 0 && readable(sa, 8) && readable(sa[0], 2)) flags = sa[0][1];
+    if (!(flags & 1)) flags |= 1;
+    uint8_t* d = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!d) return nullptr;
+    std::memcpy(d, src, DEF_SIZE);
+    uint8_t** arr = reinterpret_cast<uint8_t**>(d + 0x400);
+    uint8_t* box  = d + 0x440;   // 16-aligned: its matrix and extents are read with aligned loads
+    std::memset(box, 0, 0x60);
+    box[0] = 1;                  // box
+    box[1] = flags;
+    float* m = reinterpret_cast<float*>(box + 0x10);
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+    float* he = reinterpret_cast<float*>(box + 0x50);
+    he[0] = 0.16f; he[1] = half; he[2] = 0.16f; he[3] = 0;
+    arr[0] = box;
+    *reinterpret_cast<uint8_t***>(d + 0x80) = arr;
+    *reinterpret_cast<int32_t*>(d + 0x90)   = 1;
+    float* com = reinterpret_cast<float*>(d + 0x68);
+    com[0] = com[1] = com[2] = 0;
+    *reinterpret_cast<float*>(d + 0x98) = half + 0.5f;   // culling / broad-phase radius
+    cache[n++] = Entry{hq, d};
+    dlogf("pole body: a %.2f m box (half extents 0.16 x %.2f x 0.16, flags 0x%02X), copied from definition %u:%u with %d shapes",
+          half * 2, half, flags, srcId & 0xFFFF, srcId >> 16, sn);
+    return d;
+}
+
 void spawn_log(const PendingLog& p) {
     uint8_t* mgr   = p.mgr;
     uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
@@ -1666,6 +1724,7 @@ void spawn_log(const PendingLog& p) {
         lc = look;
     }
     uint32_t id    = ((uint32_t)lc.piece << 16) | lc.def;
+    const bool ownWanted = p.pole && p.ownModel > 0 && g_logAxis == 1;
     // the definition and piece must exist
     uint8_t* whole = o_defLookup(table, 0xFFFF0000u | lc.def);
     if (!whole || *reinterpret_cast<uintptr_t*>(whole) != g_base + 0x2EB5BD8) { dlogf("log %d: %u is not a definition", p.n, lc.def); return; }
@@ -1724,7 +1783,18 @@ void spawn_log(const PendingLog& p) {
         pos[2] = p.z + fz * g_logAhead + rot[6] * half;
     }
 
-    slot = reinterpret_cast<SpawnObjectFn>(g_base + 0x369690)(mgr, 0, id, slot, pos, rot, 0, nullptr);
+    // a pole drawn with its own model: its own pole-sized box for a body
+    // (objId is what the object is: the game looks it up through the hooked lookup; id stays the
+    // source piece, for the raw lookups below, which can't take our ids)
+    uint32_t objId = id;
+    if (ownWanted && g_poleOwnBody) {
+        if (uint8_t* bd = pole_body_def(table, id, p.height * p.scale)) {
+            g_poleBodyDef.store(bd, std::memory_order_release);
+            g_poleBodyModel.store(p.ownModel, std::memory_order_relaxed);
+            objId = 0xFFFF0000u | POLE_BODY_DEF;
+        }
+    }
+    slot = reinterpret_cast<SpawnObjectFn>(g_base + 0x369690)(mgr, 0, objId, slot, pos, rot, 0, nullptr);
     if (slot < 0) { dlogf("log %d: spawn refused", p.n); return; }
     uint8_t* obj = reinterpret_cast<uint8_t**>(vec_at(mgr + 0x290)->first)[slot];
     if (!obj) { dlogf("log %d: spawn made nothing", p.n); return; }
@@ -1788,7 +1858,7 @@ void spawn_log(const PendingLog& p) {
     }
     if (renderDef) *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (p.pole ? POLE_RENDER_DEF : LOG_RENDER_DEF);
     reinterpret_cast<BindModelFn>(g_base + 0x377340)(mgr, slot, obj, model, m);
-    *reinterpret_cast<uint32_t*>(obj + 0x124) = id;
+    *reinterpret_cast<uint32_t*>(obj + 0x124) = objId;
     reinterpret_cast<AddPhysicsFn>(g_base + 0x369E80)(mgr, obj);
     void* body = *reinterpret_cast<void**>(obj + 8);
     if (body) {
@@ -1801,7 +1871,7 @@ void spawn_log(const PendingLog& p) {
     alignas(16) float ang[4] = {b[0] * p.spin, 0, b[2] * p.spin, 0}; // tumble forward
     reinterpret_cast<ObjVecFn>(ovt[0x88 / 8])(obj, lin);
     reinterpret_cast<ObjVecFn>(ovt[0x90 / 8])(obj, ang);
-    track_log(slot, obj, id, lenS, thickS, ownDrawn ? p.height * p.scale : 0.0f);
+    track_log(slot, obj, objId, lenS, thickS, ownDrawn ? p.height * p.scale : 0.0f);
     if (lenK != 1.0f || thickK != 1.0f) {
         static int said = 0;
         if (said++ < 20) dlogf("log %d: stand-in model %d scaled %.2f long x %.2f thick to match", p.n, model, lenK, thickK);
@@ -3194,6 +3264,7 @@ void load_settings() {
     g_loadedLooks = GetPrivateProfileIntW(L"WreckingBall", L"LoadedModelFallback", 1, ini.c_str());
     g_ownModels   = GetPrivateProfileIntW(L"WreckingBall", L"OwnModels", 1, ini.c_str());
     g_poleOwnModel = GetPrivateProfileIntW(L"WreckingBall", L"PoleOwnModel", 1, ini.c_str());
+    g_poleOwnBody  = GetPrivateProfileIntW(L"WreckingBall", L"PoleOwnBody", 1, ini.c_str());
     {
         GetPrivateProfileStringW(L"WreckingBall", L"SolidModels", L"8616", big, 128, ini.c_str());
         g_solidOn = GetPrivateProfileIntW(L"WreckingBall", L"SolidPylons", 1, ini.c_str());
