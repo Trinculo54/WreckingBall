@@ -1508,7 +1508,9 @@ float g_logLength = 1.0f, g_logThickness = 1.0f, g_logMinSize = 1.6f, g_logHeigh
 std::atomic<int> g_logNext{0}, g_logsSpawned{0};
 
 struct PendingLog { uint8_t* mgr; float x, y, z, vx, vy, vz; uint8_t key[16]; uint32_t b0, b4; LogCandidate c; int n; float length;
-                    bool pole; float thick, tilt, spin, speedK, up, height; };
+                    bool pole; float thick, tilt, spin, speedK, up, height;
+                    int ownModel; float r0[9], scale; };   // a pole's own model, rotation rows (unit) and scale; ownModel -1: none
+int g_poleOwnModel = 1;   // PoleOwnModel: a falling pole is drawn with the pole's own model
 std::mutex g_pendLock;
 PendingLog g_pend[16];
 int g_nPend = 0;
@@ -1601,6 +1603,28 @@ uint8_t* render_def_for(uint8_t* table, uint32_t mid, float scale, bool pole) {
     dlogf("%s drawn with model %d (%u:%u)", pole ? "falling poles can be" : "logs can be", o_defModel(table, mid), mid & 0xFFFF, mid >> 16);
     return d;
 }
+// A render-only copy of the falling pole's body definition for drawing the pole's own model:
+// centre of mass halfway up (the bind draws the model offset by minus it from the body) and a
+// culling radius that covers the whole pole. One per half height, to a centimetre.
+uint8_t* pole_own_def(uint8_t* table, uint32_t id, float half) {
+    struct Entry { uint32_t id; int h; uint8_t* def; };
+    static Entry cache[64];
+    static int n = 0;
+    const int hq = (int)std::lround(half * 100.0f);
+    for (int k = 0; k < n; ++k) if (cache[k].id == id && cache[k].h == hq) return cache[k].def;
+    uint8_t* md = o_defLookup(table, id);
+    if (!md || !readable(md, DEF_SIZE) || n >= 64) return nullptr;
+    uint8_t* d = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!d) return nullptr;
+    std::memcpy(d, md, DEF_SIZE);
+    float* com = reinterpret_cast<float*>(d + 0x68);
+    com[0] = 0; com[1] = half; com[2] = 0;
+    float* radius = reinterpret_cast<float*>(d + 0x98);
+    *radius = std::max(*radius, half + 1.5f);
+    cache[n++] = Entry{id, hq, d};
+    return d;
+}
+
 void spawn_log(const PendingLog& p) {
     uint8_t* mgr   = p.mgr;
     uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
@@ -1650,6 +1674,22 @@ void spawn_log(const PendingLog& p) {
         rot[row * 4 + 0] = basis[k][0]; rot[row * 4 + 1] = basis[k][1]; rot[row * 4 + 2] = basis[k][2];
     }
     alignas(16) float pos[4] = {p.x + fx * g_logAhead, p.y + p.height, p.z + fz * g_logAhead, 1};
+    // A pole with its own model: it starts from how the pole stood (its own rotation, so an
+    // N-shaped pole's crossarms keep their direction), tipped by the same tilt toward the
+    // direction of travel, with its body centred halfway up it.
+    const bool own = p.pole && p.ownModel > 0 && g_logAxis == 1;
+    if (own) {
+        for (int r = 0; r < 3; ++r) {
+            const float* v = p.r0 + r * 3;   // rotate about b by t (Rodrigues)
+            float bxv[3] = {b[1] * v[2] - b[2] * v[1], b[2] * v[0] - b[0] * v[2], b[0] * v[1] - b[1] * v[0]};
+            float bd = b[0] * v[0] + b[1] * v[1] + b[2] * v[2];
+            for (int k = 0; k < 3; ++k) rot[r * 4 + k] = v[k] * ct + bxv[k] * st + b[k] * bd * (1 - ct);
+        }
+        const float half = p.height * p.scale;
+        pos[0] = p.x + fx * g_logAhead + rot[4] * half;
+        pos[1] = p.y + rot[5] * half;
+        pos[2] = p.z + fz * g_logAhead + rot[6] * half;
+    }
 
     slot = reinterpret_cast<SpawnObjectFn>(g_base + 0x369690)(mgr, 0, id, slot, pos, rot, 0, nullptr);
     if (slot < 0) { dlogf("log %d: spawn refused", p.n); return; }
@@ -1664,7 +1704,18 @@ void spawn_log(const PendingLog& p) {
     // piece's definition so its centre-of-mass offset and culling radius are used.
     uint8_t* renderDef = nullptr;
     float lenK = 1.0f, thickK = 1.0f;
-    if (p.pole) {
+    if (own) {
+        // the pole's own model, bound with a copy of the body's definition whose centre of mass
+        // is halfway up the pole (the model starts at its base) and whose culling radius covers it
+        renderDef = pole_own_def(table, id, p.height * p.scale);
+        if (renderDef) {
+            g_poleRenderDef.store(renderDef);
+            model = p.ownModel;
+            static int said = 0;
+            if (said++ < 10) dlogf("pole %d: drawn with its own model %d (scale %.2f)", p.n, model, p.scale);
+        }
+    }
+    if (p.pole && !renderDef) {
         // a pole: drawn with PoleModel (the apple trunk's bark by default), with a copy of that
         // piece's definition whose culling radius covers the stretch
         LogCandidate look = pick_look(table, poleLook);
@@ -1678,7 +1729,7 @@ void spawn_log(const PendingLog& p) {
             if (k <= 20) dlogf("pole %d: %u:%u isn't loaded here; drawn with model %d (%u:%u) instead", p.n, poleLook.def, poleLook.piece,
                               model, look.def, look.piece);
         }
-    } else if (logModel.def != 0xFFFF && pick_look(table, logModel).def < 0xFFFE) {
+    } else if (!p.pole && logModel.def != 0xFFFF && pick_look(table, logModel).def < 0xFFFE) {
         LogCandidate look = pick_look(table, logModel);
         uint32_t mid = ((uint32_t)look.piece << 16) | look.def;
         int got = o_defModel(table, mid);
@@ -1696,8 +1747,10 @@ void spawn_log(const PendingLog& p) {
     }
     alignas(16) float m[16] = {rot[0], rot[1], rot[2], 0, rot[4], rot[5], rot[6], 0, rot[8], rot[9], rot[10], 0, pos[0], pos[1], pos[2], 1};
     // experimental: scale the render model (the collision shape keeps its own size)
+    const bool ownDrawn = own && model == p.ownModel;
+    const float lenS = ownDrawn ? p.scale : p.length * lenK, thickS = ownDrawn ? p.scale : p.thick * thickK;
     for (int r = 0; r < 3; ++r) {
-        float k = r == g_logAxis ? p.length * lenK : p.thick * thickK;
+        float k = r == g_logAxis ? lenS : thickS;
         m[r * 4 + 0] *= k; m[r * 4 + 1] *= k; m[r * 4 + 2] *= k;
     }
     if (renderDef) *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (p.pole ? POLE_RENDER_DEF : LOG_RENDER_DEF);
@@ -1715,7 +1768,7 @@ void spawn_log(const PendingLog& p) {
     alignas(16) float ang[4] = {b[0] * p.spin, 0, b[2] * p.spin, 0}; // tumble forward
     reinterpret_cast<ObjVecFn>(ovt[0x88 / 8])(obj, lin);
     reinterpret_cast<ObjVecFn>(ovt[0x90 / 8])(obj, ang);
-    track_log(slot, obj, id, p.length * lenK, p.thick * thickK);
+    track_log(slot, obj, id, lenS, thickS);
     if (lenK != 1.0f || thickK != 1.0f) {
         static int said = 0;
         if (said++ < 20) dlogf("log %d: stand-in model %d scaled %.2f long x %.2f thick to match", p.n, model, lenK, thickK);
@@ -1804,6 +1857,86 @@ void d_breakPieces(uint8_t* mgr, uint8_t* obj) {
     if (swapped) *reinterpret_cast<uint32_t*>(obj + 0x124) = keep;
 }
 int g_logStretch = 1, g_logProbe = 0;
+
+// ---- loose fences drawn with their own model (platform 2.6.0 / API 7) ------------------------
+// A breakable with no pieces (a fence, most clutter) breaks off as a fresh copy of itself, and
+// BreakIntoPieces draws that copy with its definition's model (0x1412CD300, then the bind at
+// 0x14036AEC0). A fence made breakable by a name rule borrows another fence's definition, so the
+// copy came out as that fence: a green fence flew off as the rusty silver one. An instruction hook
+// at 0x14036AEAC, just after the model comes back in eax (r15 = the object hit, r14 = the
+// manager), puts in the model the procedural actually draws it with:
+//   object +0xC0 = its procedural's cell id, +0xC4 = its child; children are numbered through the
+//   procedural's groups in order, and a group's +4 is its batch (D_MODELS, 0x58 each);
+//   batch +0x50 -> render data R; R[+0] -> E; E[+0x10] -> the template instance it's copied from;
+//   that placed instance (track presentation +0xFB78, 0x70 each) has the model at +0x10.
+// For the game's own breakables that's the definition's model anyway; it only changes anything
+// when it differs, and only when that model is loaded, so a piece is never drawn invisible.
+int g_ownModels = 1;   // OwnModels
+std::atomic<int> g_ownSwaps{0};
+
+// Reads that can't fault: these follow pointers in game data that may be going away.
+bool sread(uint64_t p, void* out, size_t n) {
+    if (p < 0x10000) return false;
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(p), out, n, &got) && got == n;
+}
+template <class T> T srd(uint64_t p) { T v{}; sread(p, &v, sizeof v); return v; }
+
+// strict: 1 only when the track presentation is known and the model's resource is there
+int model_loaded(uint8_t* tp, int model) {
+    if (!tp || model < 0) return -1;
+    uint64_t mb = srd<uint64_t>(reinterpret_cast<uint64_t>(tp) + 0xF618), me = srd<uint64_t>(reinterpret_cast<uint64_t>(tp) + 0xF620);
+    if (!mb || me <= mb || (uint64_t)model >= (me - mb) / 8) return -1;
+    uint64_t md = srd<uint64_t>(mb + (uint64_t)model * 8);
+    return md && srd<uint64_t>(md + 8) ? 1 : 0;
+}
+// a placed (track) instance's model, or -1
+int placed_model(uint8_t* tp, int index) {
+    uint64_t pb = srd<uint64_t>(reinterpret_cast<uint64_t>(tp) + 0xFB78), pe = srd<uint64_t>(reinterpret_cast<uint64_t>(tp) + 0xFB80);
+    if (index < 0 || !pb || pe <= pb || (uint64_t)index >= (pe - pb) / 0x70) return -1;
+    return srd<int32_t>(pb + (uint64_t)index * 0x70 + 0x10);
+}
+// the model a collidable's procedural draws it with, or -1; name: its batch's model name
+int procedural_model(uint8_t* tp, uint8_t* mgr, uint8_t* obj, const char** name) {
+    const uint64_t o = reinterpret_cast<uint64_t>(obj), m = reinterpret_cast<uint64_t>(mgr);
+    const int proc = srd<int32_t>(o + 0xC0), child = srd<int32_t>(o + 0xC4);
+    uint64_t data = 0;
+    for (uint64_t c = srd<uint64_t>(m + 0x518), e = srd<uint64_t>(m + 0x520); c && c < e; c += 0x40)
+        if (srd<int32_t>(c + 0x28) == proc) {
+            uint64_t prov = srd<uint64_t>(c + 0x20);
+            if (srd<uintptr_t>(prov) == g_base + RVA_MODELS_VTABLE) data = srd<uint64_t>(prov + 0xF8);
+            break;
+        }
+    if (!data || child < 0) return -1;
+    int first = 0, batch = -1;
+    for (uint64_t g = srd<uint64_t>(data + D_GROUPS), ge = srd<uint64_t>(data + D_GROUPS + 8); g && g < ge; g += sizeof(Group)) {
+        int cnt = srd<int32_t>(g + 0x0C);
+        if (child < first + cnt) { batch = srd<int32_t>(g + 4); break; }
+        first += cnt;
+    }
+    uint64_t mb = srd<uint64_t>(data + D_MODELS), me = srd<uint64_t>(data + D_MODELS + 8);
+    if (batch < 0 || !mb || mb + (uint64_t)(batch + 1) * BATCH_SIZE > me) return -1;
+    const uint64_t b = mb + (uint64_t)batch * BATCH_SIZE;
+    if (name && readable(reinterpret_cast<void*>(b + B_NAME), 0x20)) *name = str_at(reinterpret_cast<uint8_t*>(b + B_NAME));
+    uint64_t R = srd<uint64_t>(b + 0x50), E = R ? srd<uint64_t>(R) : 0, I = E ? srd<uint64_t>(E + 0x10) : 0;
+    return I ? placed_model(tp, srd<int32_t>(I)) : -1;
+}
+void on_whole_model(FH2Context* c, void*) {
+    if (!g_ownModels) return;
+    uint8_t* obj = reinterpret_cast<uint8_t*>(c->r15);
+    uint8_t* mgr = reinterpret_cast<uint8_t*>(c->r14);
+    uint8_t* tp  = g_trackPres.load(std::memory_order_relaxed);
+    if (!tp || !obj || !mgr) return;
+    const int model = static_cast<int>(c->rax);
+    const char* name = "?";
+    const int own = procedural_model(tp, mgr, obj, &name);
+    if (own < 0 || own == model || model_loaded(tp, own) != 1) return;
+    c->rax = static_cast<uint32_t>(own);
+    const int k = ++g_ownSwaps;
+    if (k <= 10 || k % 200 == 0)
+        dlogf("own model: %s (definition %u) drawn with its model %d instead of %d; %d so far", name,
+              srd<uint32_t>(reinterpret_cast<uint64_t>(obj) + 0x124) & 0xFFFF, own, model, k);
+}
 
 uint64_t d_tpBind(uint8_t* tp, int slot, int model, const float* m, void* key) {
     uint64_t r = o_tpBind(tp, slot, model, m, key);
@@ -2052,7 +2185,7 @@ char g_islandPoleModels[256] = "1748,1749,1501,1502,1503";
 bool g_islandMap = false;          // the map being scanned is Storm Island (see scan_poles)
 uint8_t* g_poleTp = nullptr;       // the track presentation the poles were found in
 float g_poleSpeedLoss = 0.15f, g_poleLength = 8.5f, g_poleThick = 3.5f, g_poleHeight = 4.3f, g_poleRadius = 0.9f, g_poleMaxScale = 1.3f;
-struct Pole { int index; float x, y, z; bool broken; };
+struct Pole { int index; float x, y, z; bool broken; int model; };   // model: its lowest-numbered (LOD0) one
 std::vector<Pole> g_poleList;
 std::atomic<int> g_polesBroken{0};
 uint8_t* g_poleScanBase = nullptr;
@@ -2349,10 +2482,14 @@ void scan_poles(uint8_t* mgr) {
         ++scaleHist[hb < 0 ? 0 : hb > 7 ? 7 : hb];
         if (sc > g_poleMaxScale) { ++tooBig; continue; }   // the big ones stay as they are: solid
         bool dup = false;
-        for (const Pole& q : found)
-            if (std::fabs(q.x - p[0]) < 0.5f && std::fabs(q.z - p[2]) < 0.5f) { dup = true; break; }
+        for (Pole& q : found)
+            if (std::fabs(q.x - p[0]) < 0.5f && std::fabs(q.z - p[2]) < 0.5f) {
+                dup = true;
+                if (m < q.model) q.model = m;   // the LODs are the same instance; LOD0 has the lowest number
+                break;
+            }
         if (dup) continue;
-        Pole np{(int)i, p[0], p[1], p[2], false};
+        Pole np{(int)i, p[0], p[1], p[2], false, m};
         for (const Pole& old : g_poleList)   // keep what was already broken
             if (old.broken && std::fabs(old.x - p[0]) < 0.5f && std::fabs(old.z - p[2]) < 0.5f) np.broken = true;
         found.push_back(np);
@@ -2404,6 +2541,27 @@ void break_pole(uint8_t* mgr, Pole& pl, const float* vel) {
     p.n = 10000 + g_polesBroken.load();
     p.pole = true; p.length = g_poleLength; p.thick = g_poleThick; p.tilt = 6.0f; p.spin = 1.4f; p.speedK = 0.25f; p.up = 0.3f;
     p.height = g_poleHeight;
+    // the pole's own model and how it stands: its placed instance's rotation (nine halfs at +0x44,
+    // scale included) and its LOD0 model, drawn instead of a stretched trunk when it's loaded
+    p.ownModel = -1;
+    if (g_poleOwnModel && g_poleTp && pl.model > 0 && model_loaded(g_poleTp, pl.model) == 1) {
+        uint64_t pb = srd<uint64_t>(reinterpret_cast<uint64_t>(g_poleTp) + 0xFB78);
+        uint16_t h[9];
+        if (pb && sread(pb + (uint64_t)pl.index * 0x70 + 0x44, h, sizeof h)) {
+            float sc = 0;
+            for (int r = 0; r < 3; ++r) {
+                float v[3] = {half_to_float(h[r * 3]), half_to_float(h[r * 3 + 1]), half_to_float(h[r * 3 + 2])};
+                float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                if (l < 1e-3f) { sc = 0; break; }
+                for (int k = 0; k < 3; ++k) p.r0[r * 3 + k] = v[k] / l;
+                sc += l / 3.0f;
+            }
+            if (sc > 0.3f && p.r0[4] > 0.8f) {   // standing up (its up axis near vertical)
+                p.ownModel = pl.model;
+                p.scale    = sc;
+            }
+        }
+    }
     push_pending(p);
     // speed loss on the player's car (known from its last smash), and some wood flying
     if (uint8_t* dyn = g_lastCarDyn.load()) {
@@ -2951,6 +3109,8 @@ void load_settings() {
     g_markEnabled  = g_debug;
     g_checkUpdates = GetPrivateProfileIntW(L"WreckingBall", L"CheckUpdates", 1, ini.c_str());
     g_loadedLooks = GetPrivateProfileIntW(L"WreckingBall", L"LoadedModelFallback", 1, ini.c_str());
+    g_ownModels   = GetPrivateProfileIntW(L"WreckingBall", L"OwnModels", 1, ini.c_str());
+    g_poleOwnModel = GetPrivateProfileIntW(L"WreckingBall", L"PoleOwnModel", 1, ini.c_str());
     {
         GetPrivateProfileStringW(L"WreckingBall", L"SolidModels", L"8616", big, 128, ini.c_str());
         g_solidOn = GetPrivateProfileIntW(L"WreckingBall", L"SolidPylons", 1, ini.c_str());
@@ -3174,6 +3334,18 @@ DWORD WINAPI setup_thread(LPVOID) {
         ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
                                    reinterpret_cast<void*>(d_breakPieces), reinterpret_cast<void**>(&o_breakPieces)) != nullptr;
     else if (g_loadedLooks) logf("tree piece fallback: game code doesn't match, off");
+    // Own models for loose fences: an instruction hook, so platform 2.6.0 (API 7) or later. Not
+    // part of `ok`: without it fences just keep the look of the definition they break as.
+    static const uint8_t wm[] = {0x48, 0x8D, 0x4D, 0xC0, 0x48, 0x89, 0x4C, 0x24, 0x20};   // lea rcx,[rbp-40h]; mov [rsp+20h],rcx
+    if (g_ownModels && g_api->api_version >= 7 && code_matches(0x36AEAC, wm, sizeof wm)) {
+        if (!g_api->hook_instruction(g_mod, "BreakIntoPieces: the loose copy's model", reinterpret_cast<void*>(g_base + 0x36AEAC),
+                                     &on_whole_model, nullptr))
+            logf("own models: the platform didn't allow the hook (see platform.log); fences keep their stand-in's look");
+    } else if (g_ownModels) {
+        logf(g_api->api_version < 7 ? "own models: needs FH2 Mod Platform 2.6.0 or later; fences keep their stand-in's look"
+                                    : "own models: game code doesn't match, off");
+        g_ownModels = 0;
+    }
     static const uint8_t mu[] = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55}; // CWorldCollObjMan update
     static const uint8_t so[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x88, 0x50, 0x10}; // SpawnObject
     // Logs, poles and debris clean-up all run from here, and each can be switched on and off
