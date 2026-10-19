@@ -2524,13 +2524,25 @@ uint8_t* real_presentation(uint8_t* mgr) {
     }
     return nullptr;
 }
-// Where the CPresentation keeps its CTrackPresentation: found by looking through it for a pointer
-// to an object with CTrackPresentation's vtable (0x142EB8590), directly or one pointer deeper, and
-// remembered once found. (+0x38 was a guess that didn't hold.)
+// Is q a track presentation with its world loaded? Told by what it holds, not its first vtable
+// (the live object's isn't CTrackPresentation's 0x142EB8590): its placed models (+0xFB78, 0x70
+// each), its model list (+0xF618) and its render nodes (+0xF630) are all real vectors.
+bool valid_tp(uint64_t q) {
+    if (q < 0x10000 || (q & 7)) return false;
+    uint64_t v[3];
+    auto vec_ok = [&](uint64_t at, uint64_t elem) {
+        if (!sread(q + at, v, sizeof v)) return false;
+        return v[0] > 0x10000 && v[1] > v[0] && v[2] >= v[1] && (v[1] - v[0]) % elem == 0 && v[1] - v[0] < (1ull << 32);
+    };
+    return vec_ok(0xFB78, 0x70) && vec_ok(0xF618, 8) && vec_ok(0xF630, 8);
+}
+// Where the CPresentation keeps its CTrackPresentation: +0x38 (seen in game), or looked for among
+// its fields, directly or one pointer deeper, and remembered once found.
 int g_tpOff = -1, g_tpOff2 = -1;
 uint8_t* tp_in(uint8_t* real) {
-    const uint64_t r = reinterpret_cast<uint64_t>(real), want = g_base + 0x2EB8590;
-    auto is_tp = [&](uint64_t q) { return q > 0x10000 && !(q & 7) && srd<uint64_t>(q) == want; };
+    const uint64_t r = reinterpret_cast<uint64_t>(real);
+    auto is_tp = [&](uint64_t q) { return valid_tp(q); };
+    if (g_tpOff < 0 && is_tp(srd<uint64_t>(r + 0x38))) g_tpOff = 0x38;
     if (g_tpOff >= 0) {
         uint64_t q = srd<uint64_t>(r + g_tpOff);
         if (g_tpOff2 >= 0) q = q ? srd<uint64_t>(q + g_tpOff2) : 0;
@@ -2560,9 +2572,10 @@ uint8_t* tp_in(uint8_t* real) {
 uint8_t* track_presentation(uint8_t* mgr) {
     uint8_t* real = real_presentation(mgr);
     uint8_t* tp = real ? tp_in(real) : nullptr;
-    if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10) && *reinterpret_cast<uintptr_t*>(tp) == g_base + 0x2EB8590) {
+    if (tp && valid_tp(reinterpret_cast<uint64_t>(tp))) {
         // so "is this model loaded" can answer before anything has been bound (and after a map change)
-        if (g_trackPres.exchange(tp) != tp) dlogf("track presentation %p found", tp);
+        if (g_trackPres.exchange(tp) != tp)
+            logf("track presentation %p found (vtable +%llX)", tp, (unsigned long long)(srd<uint64_t>(reinterpret_cast<uint64_t>(tp)) - g_base));
         return tp;
     }
     // fall back on the one seen binding a loose piece
