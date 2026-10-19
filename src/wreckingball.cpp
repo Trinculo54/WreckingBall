@@ -2509,10 +2509,13 @@ bool pole_model(int m) {
 }
 uint8_t* real_presentation(uint8_t* mgr) {
     uint8_t* pres = *reinterpret_cast<uint8_t**>(mgr + 0x10);
-    if (!readable(pres, 0x28)) return nullptr;
-    // CPresentationDeferred (ctor 0x14131E9B0) keeps the real presentation at +0x38, i.e. +0x28 from
-    // the sub-object mgr+0x10 points at; the deferred calls pass +0x20 to the queue. Try both.
-    for (int off : {0x20, 0x28}) {
+    if (!readable(pres, 0x40)) return nullptr;
+    // mgr+0x10 is the TRefCountedObjectThreadSafe<CPresentationDeferred> itself (vtable 0x142E6D948),
+    // whose constructor (0x14131E9B0) keeps the real presentation at +0x38. (+0x20 and +0x28, for a
+    // pointer to its +0x10 sub-object, never matched: the presentation was only ever found from
+    // the first loose piece's bind, so until then poles weren't found and nothing knew which
+    // models were loaded.)
+    for (int off : {0x38, 0x20, 0x28}) {
         uint8_t* real = *reinterpret_cast<uint8_t**>(pres + off);
         // CPresentation, or the TRefCountedObjectThreadSafe<CPresentation> the game actually makes
         if (readable(real, 0x40) && (*reinterpret_cast<uintptr_t*>(real) == g_base + 0x2EB7BA0 ||
@@ -2524,7 +2527,11 @@ uint8_t* real_presentation(uint8_t* mgr) {
 uint8_t* track_presentation(uint8_t* mgr) {
     uint8_t* real = real_presentation(mgr);
     uint8_t* tp = real ? *reinterpret_cast<uint8_t**>(real + 0x38) : nullptr;
-    if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10) && *reinterpret_cast<uintptr_t*>(tp) == g_base + 0x2EB8590) return tp;
+    if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10) && *reinterpret_cast<uintptr_t*>(tp) == g_base + 0x2EB8590) {
+        // so "is this model loaded" can answer before anything has been bound (and after a map change)
+        if (g_trackPres.exchange(tp) != tp) dlogf("track presentation %p found", tp);
+        return tp;
+    }
     // fall back on the one seen binding a loose piece
     tp = g_trackPres.load();
     if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10)) return tp;
