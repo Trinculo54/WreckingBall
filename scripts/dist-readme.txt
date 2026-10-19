@@ -34,7 +34,8 @@ overwrite.
 In the game
 ~~~~~~~~~~~
 
-Pause > Settings > MODS has WreckingBall's main switches: breakable trees,
+The pause menu's MODS tab (Installed mods > WreckingBall) and
+Pause > Settings > MODS have WreckingBall's main switches: breakable trees,
 logs, fences and railings, roadside clutter, falling telephone poles, solid
 concrete pylons and debris clean-up. Logs, poles, pylons and clean-up
 switch straight away. Trees, fences and clutter take a restart, and the
