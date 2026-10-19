@@ -2029,7 +2029,13 @@ void mark_dump(uint8_t* mgr) {
 // is hidden, its collision (removed up front, like tree trunks) stays gone, and a stretched
 // wooden pole piece falls in its place.
 int g_poles = 1;
+// Model numbers are each map's own (its bin.zip AssetManifest's NNNNN.modelbin). The mainland
+// (anthemout): GEN_OBJ_Pylon_Generic_Wooden 8953/8954, GEN_OBJ_Pylon_Nshaped_Wooden 8619-8621.
+// Storm Island (test03out): Generic_Wooden 1748/1749, Nshaped_Wooden 1501-1503.
 char g_poleModels[256] = "8953,8954,8619,8620,8621";
+char g_islandPoleModels[256] = "1748,1749,1501,1502,1503";
+bool g_islandMap = false;          // the map being scanned is Storm Island (see scan_poles)
+uint8_t* g_poleTp = nullptr;       // the track presentation the poles were found in
 float g_poleSpeedLoss = 0.15f, g_poleLength = 8.5f, g_poleThick = 3.5f, g_poleHeight = 4.3f, g_poleRadius = 0.9f, g_poleMaxScale = 1.3f;
 struct Pole { int index; float x, y, z; bool broken; };
 std::vector<Pole> g_poleList;
@@ -2037,7 +2043,7 @@ std::atomic<int> g_polesBroken{0};
 uint8_t* g_poleScanBase = nullptr;
 size_t g_poleScanCount = 0;
 bool pole_model(int m) {
-    const char* r = g_poleModels;
+    const char* r = g_islandMap ? g_islandPoleModels : g_poleModels;
     while (*r) {
         while (*r == ' ' || *r == ',') ++r;
         if (!*r) break;
@@ -2284,16 +2290,36 @@ int d_getPolys(void* world, const float* box, int max, uint8_t** tris, uint8_t**
     return n;
 }
 
+// A different map (the mainland and Storm Island): what was found on the last one goes, its
+// indexes mean nothing here.
+void forget_poles() {
+    g_poleList.clear();
+    g_poleScanBase  = nullptr;
+    g_poleScanCount = 0;
+}
 void scan_poles(uint8_t* mgr) {
     uint8_t* tp = track_presentation(mgr);
     if (!tp) return;
+    if (tp != g_poleTp) {
+        if (g_poleTp) logf("poles: the map changed; looking for them again");
+        forget_poles();
+        g_poleTp = tp;
+    }
     uint8_t* b = *reinterpret_cast<uint8_t**>(tp + 0xFB78);
     uint8_t* e = *reinterpret_cast<uint8_t**>(tp + 0xFB80);
     if (!b || e <= b) return;
     size_t n = (size_t)(e - b) / 0x70;
     if (b == g_poleScanBase && n == g_poleScanCount) return;
+    if (!readable(b, 0x70) || !readable(e - 0x70, 0x70)) return;   // still being built
     g_poleScanBase = b; g_poleScanCount = n;
-    if (g_solidModels[0]) build_solids(b, n);
+    // Which map: the breakable definitions say (Storm Island numbers them differently), or,
+    // before any has been seen, its size (the mainland has about 88,000 placed models, the
+    // island about 14,000).
+    const DefMap* dm = g_lastDefMap.load(std::memory_order_acquire);
+    const bool island = dm ? dm->moved : n < 40000;
+    if (island != g_islandMap) logf("poles: on %s", island ? "Storm Island" : "the mainland");
+    g_islandMap = island;
+    if (g_solidModels[0] && !island) build_solids(b, n);   // the concrete pylons are only on the mainland
     std::vector<Pole> found;
     int perModel = 0, tooBig = 0;
     int scaleHist[8] = {};   // 0.25-wide buckets from 0.5
@@ -2530,7 +2556,22 @@ void d_mgrUpdate(uint8_t* mgr, float a, float b) {
     g_worldMgr.store(mgr, std::memory_order_relaxed);
     g_frame.fetch_add(1, std::memory_order_relaxed);
     if (g_poles) {
-        __try { update_poles(mgr); } __except (EXCEPTION_EXECUTE_HANDLER) { logf("poles crashed; turned off"); g_poles = 0; }
+        // a crash (a map being swapped out under it, say) starts the poles over, and after a
+        // pause they're looked for again; only one that keeps crashing turns them off
+        static int crashes = 0, pause = 0;
+        if (pause > 0) {
+            --pause;
+        } else {
+            __try {
+                update_poles(mgr);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                forget_poles();
+                g_poleTp = nullptr;
+                pause    = 120;
+                if (++crashes >= 20) { logf("poles crashed %d times; turned off", crashes); g_poles = 0; }
+                else logf("poles crashed; trying again shortly");
+            }
+        }
     }
     if (g_logProbe) { __try { piece_report(mgr); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     __try { update_debris(mgr); } __except (EXCEPTION_EXECUTE_HANDLER) { logf("debris clean-up crashed; turned off"); g_debrisLifetime = g_debrisDistance = 0; }
@@ -2841,6 +2882,9 @@ void load_settings() {
         MultiByteToWideChar(CP_UTF8, 0, g_poleModels, -1, d, 256);
         GetPrivateProfileStringW(L"WreckingBall", L"PoleModels", d, w, 256, ini.c_str());
         WideCharToMultiByte(CP_UTF8, 0, w, -1, g_poleModels, sizeof g_poleModels, nullptr, nullptr);
+        MultiByteToWideChar(CP_UTF8, 0, g_islandPoleModels, -1, d, 256);
+        GetPrivateProfileStringW(L"WreckingBall", L"IslandPoleModels", d, w, 256, ini.c_str());
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, g_islandPoleModels, sizeof g_islandPoleModels, nullptr, nullptr);
     }
     g_barrierProbe      = getf(L"BarrierGroundProbe", 3.0f);
     g_barrierPointRadius = getf(L"BarrierCollisionRadius", 0.9f);
