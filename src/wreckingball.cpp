@@ -1505,6 +1505,12 @@ int g_logs = 1, g_logCycle = 1, g_logAxis = 1;
 float g_logLengthJitter = 0.25f, g_logLengthSizeExp = 1.0f, g_logLengthMin = 1.5f, g_logLengthMax = 5.0f;
 float g_logLength = 1.0f, g_logThickness = 1.0f, g_logMinSize = 1.6f, g_logHeight = 1.0f, g_logAhead = 0.0f, g_logSpeed = 0.7f, g_logUp = 2.0f, g_logSpin = 3.0f,
       g_logTilt = 90.0f;
+// LogFromCar: a log appears just ahead of the car, low and lying across its path, so the nose
+// sweeps it along, instead of at the tree, a metre up, where the car ran under it and carried it
+// on its roof. LogCarAhead: metres ahead of the car's centre; LogCarHeight: above the car's
+// centre (about half a metre off the ground); LogCarUp: its upward speed (m/s).
+int g_logFromCar = 1;
+float g_logCarAhead = 3.0f, g_logCarHeight = 0.1f, g_logCarUp = 0.0f;
 std::atomic<int> g_logNext{0}, g_logsSpawned{0};
 
 struct PendingLog { uint8_t* mgr; float x, y, z, vx, vy, vz; uint8_t key[16]; uint32_t b0, b4; LogCandidate c; int n; float length;
@@ -1672,11 +1678,22 @@ void spawn_log(const PendingLog& p) {
     float c[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
     alignas(16) float rot[12] = {};
     const float* basis[3] = {a, b, c};
+    // a log from the car: lying across the car's path (long axis sideways, up as the second)
+    const bool fromCar = !p.pole && g_logFromCar && sp > 2.0f;
+    float up[3] = {0, 1, 0}, side[3] = {b[0], b[1], b[2]};
+    float sc[3] = {side[1] * up[2] - side[2] * up[1], side[2] * up[0] - side[0] * up[2], side[0] * up[1] - side[1] * up[0]};
+    if (fromCar) { basis[0] = side; basis[1] = up; basis[2] = sc; }
     for (int k = 0; k < 3; ++k) {
         int row = (g_logAxis + k) % 3;
         rot[row * 4 + 0] = basis[k][0]; rot[row * 4 + 1] = basis[k][1]; rot[row * 4 + 2] = basis[k][2];
     }
     alignas(16) float pos[4] = {p.x + fx * g_logAhead, p.y + p.height, p.z + fz * g_logAhead, 1};
+    if (fromCar) {
+        const float* car = reinterpret_cast<const float*>(mgr + 0x4F0);
+        pos[0] = car[0] + fx * g_logCarAhead;
+        pos[1] = car[1] + g_logCarHeight;
+        pos[2] = car[2] + fz * g_logCarAhead;
+    }
     // A pole with its own model: it starts from how the pole stood (its own rotation, so an
     // N-shaped pole's crossarms keep their direction), tipped by the same tilt toward the
     // direction of travel, with its body centred halfway up it.
@@ -1767,7 +1784,7 @@ void spawn_log(const PendingLog& p) {
         reinterpret_cast<BodyWakeFn>(bvt[0x128 / 8])(body, 0, 0);
     }
     void** ovt = *reinterpret_cast<void***>(obj);
-    alignas(16) float lin[4] = {p.vx * p.speedK, p.vy * p.speedK + p.up, p.vz * p.speedK, 0};
+    alignas(16) float lin[4] = {p.vx * p.speedK, p.vy * p.speedK + (fromCar ? g_logCarUp : p.up), p.vz * p.speedK, 0};
     alignas(16) float ang[4] = {b[0] * p.spin, 0, b[2] * p.spin, 0}; // tumble forward
     reinterpret_cast<ObjVecFn>(ovt[0x88 / 8])(obj, lin);
     reinterpret_cast<ObjVecFn>(ovt[0x90 / 8])(obj, ang);
@@ -3105,6 +3122,10 @@ void load_settings() {
     g_logSpeed   = getf(L"LogSpeed", 0.7f);
     g_logUp      = getf(L"LogUp", 2.0f);
     g_logSpin    = getf(L"LogSpin", 3.0f);
+    g_logFromCar   = GetPrivateProfileIntW(L"WreckingBall", L"LogFromCar", 1, ini.c_str());
+    g_logCarAhead  = getf(L"LogCarAhead", 3.0f);
+    g_logCarHeight = getf(L"LogCarHeight", 0.1f);
+    g_logCarUp     = getf(L"LogCarUp", 0.0f);
     g_logStretch   = GetPrivateProfileIntW(L"WreckingBall", L"LogStretch", 1, ini.c_str());
     g_logLength    = getf(L"LogLength", 3.0f);
     g_logThickness = getf(L"LogThickness", 4.5f);
