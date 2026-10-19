@@ -1592,7 +1592,7 @@ using BodyIntFn     = void (*)(void* body, int v);
 using BodyWakeFn    = void (*)(void* body, int a, int b);
 using ObjVecFn      = void (*)(uint8_t* obj, const float* v);
 
-void track_log(int slot, uint8_t* obj, uint32_t id, float length, float thick);
+void track_log(int slot, uint8_t* obj, uint32_t id, float length, float thick, float down);
 // a render-only copy of a piece's definition with its culling radius scaled, one per piece and use
 uint8_t* render_def_for(uint8_t* table, uint32_t mid, float scale, bool pole) {
     struct Entry { uint32_t mid; bool pole; uint8_t* def; };
@@ -1789,7 +1789,7 @@ void spawn_log(const PendingLog& p) {
     alignas(16) float ang[4] = {b[0] * p.spin, 0, b[2] * p.spin, 0}; // tumble forward
     reinterpret_cast<ObjVecFn>(ovt[0x88 / 8])(obj, lin);
     reinterpret_cast<ObjVecFn>(ovt[0x90 / 8])(obj, ang);
-    track_log(slot, obj, id, lenS, thickS);
+    track_log(slot, obj, id, lenS, thickS, ownDrawn ? p.height * p.scale : 0.0f);
     if (lenK != 1.0f || thickK != 1.0f) {
         static int said = 0;
         if (said++ < 20) dlogf("log %d: stand-in model %d scaled %.2f long x %.2f thick to match", p.n, model, lenK, thickK);
@@ -1983,15 +1983,16 @@ struct LiveLog {
     int slot; uint8_t* obj; uint32_t id; int frames;
     float length;  // model stretch along its length for this log
     float thick;   // and across it
+    float down;    // a pole drawn with its own model: how far its base is below the body, along it
 };
 LiveLog g_live[64];
 int g_nLive = 0;
 std::mutex g_liveLock;
 
-void track_log(int slot, uint8_t* obj, uint32_t id, float length, float thick) {
+void track_log(int slot, uint8_t* obj, uint32_t id, float length, float thick, float down) {
     std::lock_guard<std::mutex> l(g_liveLock);
     if (g_nLive == 64) { std::memmove(g_live, g_live + 1, sizeof(LiveLog) * 63); --g_nLive; }
-    g_live[g_nLive++] = LiveLog{slot, obj, id, 0, length, thick};
+    g_live[g_nLive++] = LiveLog{slot, obj, id, 0, length, thick, down};
 }
 
 float len3(const float* v) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
@@ -2028,20 +2029,35 @@ NodeUpdateFn o_nodeUpdate = nullptr;
 constexpr int NSTRETCH = 64;
 std::atomic<uint8_t*> g_stretchNode[NSTRETCH];
 std::atomic<float> g_stretchLen[NSTRETCH], g_stretchThick[NSTRETCH];
+// A pole drawn with its own model starts at its base, but the game draws it each frame around
+// the body's centre (it uses the body piece's own centre of mass then, not the bind's), so its
+// base is moved down the pole by g_stretchDown. g_stretchLast is the translation it was moved
+// to, so a node that hasn't been rewritten since isn't moved twice.
+std::atomic<float> g_stretchDown[NSTRETCH];
+float g_stretchLast[NSTRETCH][3];
 std::atomic<int> g_stretchCount{0};
 
 uint64_t d_nodeUpdate(void* a, void* b, void* c, uint64_t d, uint8_t* node, uint64_t f, uint64_t g, uint64_t h) {
     if (g_stretchCount.load(std::memory_order_relaxed) && node) {
         for (int i = 0; i < NSTRETCH; ++i)
             if (g_stretchNode[i].load(std::memory_order_relaxed) == node) {
-                stretch_rows(reinterpret_cast<float*>(node + 0x20), 4, g_stretchLen[i].load(std::memory_order_relaxed),
-                             g_stretchThick[i].load(std::memory_order_relaxed));
+                float* mx = reinterpret_cast<float*>(node + 0x20);
+                stretch_rows(mx, 4, g_stretchLen[i].load(std::memory_order_relaxed), g_stretchThick[i].load(std::memory_order_relaxed));
+                const float down = g_stretchDown[i].load(std::memory_order_relaxed);
+                float* tr = mx + 12;
+                if (down > 0 && !(tr[0] == g_stretchLast[i][0] && tr[1] == g_stretchLast[i][1] && tr[2] == g_stretchLast[i][2])) {
+                    const float* ax = mx + g_logAxis * 4;
+                    const float l = len3(ax);
+                    if (l > 1e-3f)
+                        for (int k = 0; k < 3; ++k) tr[k] -= ax[k] / l * down;
+                    std::memcpy(g_stretchLast[i], tr, sizeof g_stretchLast[i]);
+                }
                 break;
             }
     }
     return o_nodeUpdate(a, b, c, d, node, f, g, h);
 }
-void stretch_node_add(uint8_t* node, float length, float thick) {
+void stretch_node_add(uint8_t* node, float length, float thick, float down) {
     if (!node || !o_nodeUpdate) return;
     for (int i = 0; i < NSTRETCH; ++i) if (g_stretchNode[i].load() == node) return;
     for (int i = 0; i < NSTRETCH; ++i) {
@@ -2049,6 +2065,8 @@ void stretch_node_add(uint8_t* node, float length, float thick) {
         if (g_stretchNode[i].load() != nullptr) continue;
         g_stretchLen[i].store(length);   // the slot is free: set its length before publishing the node
         g_stretchThick[i].store(thick);
+        g_stretchDown[i].store(down);
+        g_stretchLast[i][0] = g_stretchLast[i][1] = g_stretchLast[i][2] = 0;
         if (g_stretchNode[i].compare_exchange_strong(expect, node)) { g_stretchCount.fetch_add(1); return; }
     }
 }
@@ -2110,9 +2128,9 @@ void update_live_logs(uint8_t* mgr) {
             stretch_node_remove(old);
             g_slotRender[L.slot].node.store(now);
         }
-        bool mine = now && readable(now + 0x20, 0x40) && near3(reinterpret_cast<const float*>(now + 0x50), pos, 6.0f);
+        bool mine = now && readable(now + 0x20, 0x40) && near3(reinterpret_cast<const float*>(now + 0x50), pos, 6.0f + L.down);
         if (L.frames >= 2) {
-            if (mine) stretch_node_add(now, L.length, L.thick);
+            if (mine) stretch_node_add(now, L.length, L.thick, L.down);
             else stretch_node_remove(now);
         }
         g_live[w++] = L;
@@ -2577,7 +2595,7 @@ void break_pole(uint8_t* mgr, Pole& pl, const float* vel) {
     // the pole's own model and how it stands: its placed instance's rotation (nine halfs at +0x44,
     // scale included) and its LOD0 model, drawn instead of a stretched trunk when it's loaded
     p.ownModel = -1;
-    if (g_poleOwnModel && g_poleTp && pl.model > 0 && model_loaded(g_poleTp, pl.model) == 1) {
+    if (g_poleOwnModel && o_nodeUpdate && g_poleTp && pl.model > 0 && model_loaded(g_poleTp, pl.model) == 1) {
         uint64_t pb = srd<uint64_t>(reinterpret_cast<uint64_t>(g_poleTp) + 0xFB78);
         uint16_t h[9];
         if (pb && sread(pb + (uint64_t)pl.index * 0x70 + 0x44, h, sizeof h)) {
