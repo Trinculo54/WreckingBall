@@ -1663,6 +1663,35 @@ uint8_t* pole_own_def(uint8_t* table, uint32_t id, float half) {
     return d;
 }
 
+// A definition's own physics numbers (named by CPhysicsDefinition's serialiser, 0x1412DAEE0):
+// +0x08 InertiaTensor and +0x2C InverseInertiaTensor (3x3 each), +0x50 HalfExtents and +0x5C
+// AabbCentreOffset (its bounds), +0x68 GraphicsOffset (where the model is drawn from the body),
+// +0x94 NumChildren, +0x98 BoundingRadius, +0x9C Mass. A rigid body is made from these along
+// with the shapes, so a copy with a box of another size needs them for that box, or it turns
+// like the piece it was copied from (logs four times that piece's length jittered on the ground).
+void set_box_physics(uint8_t* d, const float* centre, const float* half) {
+    const float m = *reinterpret_cast<float*>(d + 0x9C);
+    const float x = 2 * half[0], y = 2 * half[1], z = 2 * half[2];
+    const float I[3] = {m / 12 * (y * y + z * z), m / 12 * (x * x + z * z), m / 12 * (x * x + y * y)};
+    float* it = reinterpret_cast<float*>(d + 0x08);
+    float* iv = reinterpret_cast<float*>(d + 0x2C);
+    if (g_debug) {
+        static int said = 0;
+        if (said++ < 6)
+            dlogf("  copied inertia diag %.4f %.4f %.4f (inverse %.2f %.2f %.2f), half extents %.2f %.2f %.2f; the box's: %.4f %.4f %.4f", it[0], it[4],
+                  it[8], iv[0], iv[4], iv[8], *reinterpret_cast<float*>(d + 0x50), *reinterpret_cast<float*>(d + 0x54),
+                  *reinterpret_cast<float*>(d + 0x58), I[0], I[1], I[2]);
+    }
+    for (int k = 0; k < 9; ++k) it[k] = iv[k] = 0;
+    for (int a = 0; a < 3; ++a) {
+        it[a * 4] = I[a];
+        iv[a * 4] = I[a] > 1e-6f ? 1.0f / I[a] : 0;
+    }
+    float* he = reinterpret_cast<float*>(d + 0x50);
+    float* co = reinterpret_cast<float*>(d + 0x5C);
+    for (int a = 0; a < 3; ++a) { he[a] = half[a]; co[a] = centre[a]; }
+}
+
 // A pole's own body: a copy of a pole piece's definition (CCollObjPhysicsDefinition, vtable
 // 0x142EB5BD8) whose collision is a single box the size of the pole, centred on the body.
 // A definition's collision is a list of shapes: +0x80 points to their pointers, +0x90 is how
@@ -1703,6 +1732,8 @@ uint8_t* pole_body_def(uint8_t* table, uint32_t srcId, float half) {
     float* com = reinterpret_cast<float*>(d + 0x68);
     com[0] = com[1] = com[2] = 0;
     *reinterpret_cast<float*>(d + 0x98) = half + 0.5f;   // culling / broad-phase radius
+    const float centre[3] = {0, 0, 0}, hx[3] = {0.16f, half, 0.16f};
+    set_box_physics(d, centre, hx);
     cache[n++] = Entry{hq, d};
     dlogf("pole body: a %.2f m box (half extents 0.16 x %.2f x 0.16, flags 0x%02X), copied from definition %u:%u with %d shapes",
           half * 2, half, flags, srcId & 0xFFFF, srcId >> 16, sn);
@@ -1802,6 +1833,7 @@ uint32_t log_body_def(uint8_t* table, uint32_t mid, float lenS, float thickS, in
     float* com = reinterpret_cast<float*>(d + 0x68);
     for (int a = 0; a < 3; ++a) com[a] *= S[a];
     *reinterpret_cast<float*>(d + 0x98) = std::sqrt(r2) + 0.2f;
+    set_box_physics(d, m + 12, he);
     b.mid = mid; b.lq = lq; b.tq = tq; b.used = tick;
     b.model.store(model);
     b.def.store(d, std::memory_order_release);
