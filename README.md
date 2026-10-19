@@ -41,7 +41,7 @@ When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO
 
 [FH2ML](https://github.com/Refilewski/FH2ML) loads every mod in the `mods` folder and gives them shared services: hooks that let several mods change the same game code without stepping on each other, the MODS page and tab in the game, update checks and crash reports. Install, enable, disable and order mods with the FH2ML Manager.
 
-**Playing with a racing wheel.** WreckingBall no longer puts anything next to `azimuth.exe`, so it doesn't get in the way of [fh2wheel](https://github.com/iamAzoDx/fh2wheel). If you installed fh2wheel alongside WreckingBall 1.3 or older, removing the old mod loader removes the file fh2wheel needs too: install fh2wheel again as its own instructions say.
+**Playing with a racing wheel.** WreckingBall no longer puts anything next to `azimuth.exe`, so it doesn't get in the way of [fh2wheel](https://github.com/iamAzoDx/fh2wheel). Keep `fh2wheel.dll` and `fh2wheel-config.exe` next to `azimuth.exe`: FH2ML loads `fh2wheel.dll` itself when fh2wheel's own `D3DCOMPILER_47.dll` isn't there (as after the old mod loader is removed), and leaves it to that file when it is. Either way fh2wheel shows up on the MODS tab.
 
 ## Settings
 
