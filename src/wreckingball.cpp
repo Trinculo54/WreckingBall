@@ -1517,6 +1517,11 @@ struct PendingLog { uint8_t* mgr; float x, y, z, vx, vy, vz; uint8_t key[16]; ui
                     bool pole; float thick, tilt, spin, speedK, up, height;
                     int ownModel; float r0[9], scale; };   // a pole's own model, rotation rows (unit) and scale; ownModel -1: none
 int g_poleOwnModel = 1;   // PoleOwnModel: a falling pole is drawn with the pole's own model
+// PoleBody: the breakable piece that is a pole drawn with its own model's physics body. The large
+// triple street light's main pole (91:0, ~8.7 m: bounding radius 4.36) is as long as a telephone
+// pole; the arched street light's 28:3 is only ~3 m, so a pole's ends went through the ground
+// and the car. Falls back on 28:3 where a map hasn't got it.
+LogCandidate g_poleBody{91, 0};
 std::mutex g_pendLock;
 PendingLog g_pend[16];
 int g_nPend = 0;
@@ -1640,6 +1645,13 @@ void spawn_log(const PendingLog& p) {
     // this map's numbers for the log's own piece and the looks it's drawn with
     const LogCandidate poleLook = nlc(table, g_poleLook), logModel = nlc(table, g_logModel);
     LogCandidate lc = nlc(table, p.c);
+    if (p.pole && p.ownModel > 0 && g_poleBody.def != 0xFFFF) {
+        LogCandidate pb = nlc(table, g_poleBody);
+        uint8_t* w = pb.def < 0xFFFE ? o_defLookup(table, 0xFFFF0000u | pb.def) : nullptr;
+        if (w && *reinterpret_cast<uintptr_t*>(w) == g_base + 0x2EB5BD8 &&
+            (pb.piece == 0xFFFF || pb.piece < *reinterpret_cast<uint32_t*>(w + 0x94)))
+            lc = pb;
+    }
     if (lc.def == 0xFFFE) {
         // the piece that's normally its body (the wooden pylon's pole, 28:3) isn't on this map
         // (Storm Island): the trunk it's drawn with is its body instead
@@ -2610,6 +2622,21 @@ void break_pole(uint8_t* mgr, Pole& pl, const float* vel) {
             if (sc > 0.3f && p.r0[4] > 0.8f) {   // standing up (its up axis near vertical)
                 p.ownModel = pl.model;
                 p.scale    = sc;
+                // the size it's drawn at: its render node's rows (placed instances' nodes come
+                // first, (tp+0xF630)[index]), in case that isn't quite its placement's scale
+                uint64_t nb = srd<uint64_t>(reinterpret_cast<uint64_t>(g_poleTp) + 0xF630);
+                uint64_t ne = srd<uint64_t>(reinterpret_cast<uint64_t>(g_poleTp) + 0xF638);
+                uint64_t node = nb && (uint64_t)pl.index < (ne - nb) / 8 ? srd<uint64_t>(nb + (uint64_t)pl.index * 8) : 0;
+                float rows[12];
+                if (node && sread(node + 0x20, rows, sizeof rows)) {
+                    float ns = 0;
+                    for (int r = 0; r < 3; ++r) ns += len3(rows + r * 4) / 3.0f;
+                    static int said = 0;
+                    if (said++ < 10)
+                        dlogf("pole %d: placement scale %.3f, its render node's %.3f (rows %.3f %.3f %.3f)", (int)(10000 + g_polesBroken.load()), sc,
+                              ns, len3(rows), len3(rows + 4), len3(rows + 8));
+                    if (ns > 0.5f && ns < 2.0f) p.scale = ns;
+                }
             }
         }
     }
