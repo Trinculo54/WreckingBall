@@ -403,6 +403,11 @@ constexpr uint32_t LOG_RENDER_DEF = 0xF0FF, POLE_RENDER_DEF = 0xF0FE;
 constexpr uint32_t POLE_BODY_DEF = 0xF0FD;
 std::atomic<uint8_t*> g_poleBodyDef{nullptr};
 std::atomic<int> g_poleBodyModel{-1};   // the model its last pole was drawn with
+// Logs get bodies of their own the same way, sized to each log as it's drawn: a pool of ids,
+// one per log look and size (to a quarter of the stretch), reused oldest first (log_body_def).
+constexpr uint32_t LOG_BODY_FIRST = 0xF080, LOG_BODY_COUNT = 0x7C;   // 0xF080..0xF0FB
+struct LogBody { std::atomic<uint8_t*> def{nullptr}; std::atomic<int> model{-1}; uint32_t mid; int lq, tq; uint64_t used; };
+LogBody g_logBodies[LOG_BODY_COUNT];
 std::atomic<uint8_t*> g_logRenderDef{nullptr}, g_poleRenderDef{nullptr};
 
 uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
@@ -410,6 +415,10 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
     if (lo == POLE_RENDER_DEF) {
         if (uint8_t* d = g_poleRenderDef.load(std::memory_order_acquire)) return d;
         return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
+    }
+    if (lo >= LOG_BODY_FIRST && lo < LOG_BODY_FIRST + LOG_BODY_COUNT) {
+        if (uint8_t* d = g_logBodies[lo - LOG_BODY_FIRST].def.load(std::memory_order_acquire)) return d;
+        return o_defLookup(table, 0xFFFF0000u | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
     }
     if (lo == POLE_BODY_DEF) {
         if (uint8_t* d = g_poleBodyDef.load(std::memory_order_acquire)) return d;
@@ -436,6 +445,8 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
 int d_defModel(uint8_t* table, uint32_t id) {
     uint32_t lo = id & 0xFFFF;
     if (lo == POLE_BODY_DEF && g_poleBodyModel.load(std::memory_order_relaxed) >= 0) return g_poleBodyModel.load(std::memory_order_relaxed);
+    if (lo >= LOG_BODY_FIRST && lo < LOG_BODY_FIRST + LOG_BODY_COUNT && g_logBodies[lo - LOG_BODY_FIRST].model.load() >= 0)
+        return g_logBodies[lo - LOG_BODY_FIRST].model.load();
     if (lo >= (uint32_t)CLONE_BASE && lo < (uint32_t)(CLONE_BASE + NUM_TIERS))
         return o_defModel(table, (id & 0xFFFF0000u) | (uint32_t)(tree_def(table, false) & 0xFFFF));
     return o_defModel(table, id);
@@ -1533,6 +1544,7 @@ int g_poleOwnModel = 1;   // PoleOwnModel: a falling pole is drawn with the pole
 // pole; the arched street light's 28:3 is only ~3 m, so a pole's ends went through the ground
 // and the car. Falls back on 28:3 where a map hasn't got it.
 LogCandidate g_poleBody{91, 0};
+int g_logOwnBody = 1;    // LogOwnBody: a log's body is a box the size of the log as it's drawn
 int g_poleOwnBody = 1;   // PoleOwnBody: such a pole's body is a box the size of the pole (pole_body_def)
 std::mutex g_pendLock;
 PendingLog g_pend[16];
@@ -1697,6 +1709,101 @@ uint8_t* pole_body_def(uint8_t* table, uint32_t srcId, float half) {
     return d;
 }
 
+// A log's own body: one box around the collision shapes of the trunk piece it's drawn with,
+// scaled the way the log is drawn (thickS across, lenS along its length, the body's Y), with
+// the centre of mass scaled the same way so the model stays on it. Only box and sphere shapes
+// are understood; a piece with any other kind keeps the old body (and is dumped once, with
+// Debug=1). Returns the id (low 16 bits) or 0.
+std::string hexdump(const uint8_t* p, size_t n);
+uint32_t log_body_def(uint8_t* table, uint32_t mid, float lenS, float thickS, int model) {
+    static std::mutex lock;
+    std::lock_guard<std::mutex> l(lock);
+    static uint64_t tick = 0;
+    ++tick;
+    const int lq = (int)std::lround(lenS * 4), tq = (int)std::lround(thickS * 4);
+    int freeSlot = -1, oldest = 0;
+    for (uint32_t k = 0; k < LOG_BODY_COUNT; ++k) {
+        LogBody& b = g_logBodies[k];
+        if (b.def.load() && b.mid == mid && b.lq == lq && b.tq == tq) { b.used = tick; return LOG_BODY_FIRST + k; }
+        if (!b.def.load() && freeSlot < 0) freeSlot = (int)k;
+        if (b.used < g_logBodies[oldest].used) oldest = (int)k;
+    }
+    uint8_t* src = o_defLookup(table, mid);
+    if (!src || !readable(src, DEF_SIZE) || *reinterpret_cast<uintptr_t*>(src) != g_base + 0x2EB5BD8) return 0;
+    // the source's shapes: their bounds, in their own coordinates
+    float mn[3] = {1e9f, 1e9f, 1e9f}, mx[3] = {-1e9f, -1e9f, -1e9f};
+    uint8_t flags = 0;
+    int sn = *reinterpret_cast<int32_t*>(src + 0x90);
+    uint8_t** sa = *reinterpret_cast<uint8_t***>(src + 0x80);
+    bool ok = sn > 0 && sn < 16 && readable(sa, sizeof(void*) * sn);
+    static std::set<uint32_t> dumped;
+    for (int i = 0; ok && i < sn; ++i) {
+        uint8_t* sh = sa[i];
+        if (!readable(sh, 0x60)) { ok = false; break; }
+        flags |= sh[1];
+        if (sh[0] == 1) {   // box: centre + |R| * half extents
+            const float* t = reinterpret_cast<const float*>(sh + 0x10);
+            const float* h = reinterpret_cast<const float*>(sh + 0x50);
+            for (int a = 0; a < 3; ++a) {
+                float e = std::fabs(t[0 * 4 + a]) * h[0] + std::fabs(t[1 * 4 + a]) * h[1] + std::fabs(t[2 * 4 + a]) * h[2];
+                mn[a] = std::min(mn[a], t[12 + a] - e);
+                mx[a] = std::max(mx[a], t[12 + a] + e);
+            }
+        } else if (sh[0] == 0) {   // sphere: position and radius
+            const float* q = reinterpret_cast<const float*>(sh + 0x10);
+            for (int a = 0; a < 3; ++a) { mn[a] = std::min(mn[a], q[a] - q[3]); mx[a] = std::max(mx[a], q[a] + q[3]); }
+        } else {
+            ok = false;
+            if (g_debug && dumped.insert(mid).second) {
+                dlogf("log body: %u:%u has a shape of type %u (flags 0x%02X); keeping the old body. Its bytes: %s", mid & 0xFFFF, mid >> 16,
+                      sh[0], sh[1], hexdump(sh, 0x80).c_str());
+                for (int o = 0x50; o <= 0x68; o += 8) {
+                    uint8_t* q = *reinterpret_cast<uint8_t**>(sh + o);
+                    if (readable(q, 0x40)) dlogf("  +0x%X -> %s", o, hexdump(q, 0x40).c_str());
+                }
+            }
+        }
+    }
+    if (!ok || mn[0] > mx[0]) return 0;
+    const float S[3] = {thickS, lenS, thickS};
+    const uint32_t k = freeSlot >= 0 ? (uint32_t)freeSlot : (uint32_t)oldest;
+    LogBody& b = g_logBodies[k];
+    uint8_t* d = b.def.load();
+    if (!d) d = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!d) return 0;
+    // (a reused copy may still be some faded log's: the rigid body kept its own pointer to the
+    // shape, so the box is rewritten in place to a log of a similar size, never freed)
+    std::memcpy(d, src, DEF_SIZE);
+    uint8_t** arr = reinterpret_cast<uint8_t**>(d + 0x400);
+    uint8_t* box  = d + 0x440;
+    std::memset(box, 0, 0x60);
+    box[0] = 1;
+    box[1] = (uint8_t)(flags | 1);
+    float* m = reinterpret_cast<float*>(box + 0x10);
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+    float* he = reinterpret_cast<float*>(box + 0x50);
+    float r2 = 0;
+    for (int a = 0; a < 3; ++a) {
+        m[12 + a] = (mn[a] + mx[a]) * 0.5f * S[a];
+        he[a]     = std::max((mx[a] - mn[a]) * 0.5f * S[a], 0.05f);
+        r2 += (std::fabs(m[12 + a]) + he[a]) * (std::fabs(m[12 + a]) + he[a]);
+    }
+    arr[0] = box;
+    *reinterpret_cast<uint8_t***>(d + 0x80) = arr;
+    *reinterpret_cast<int32_t*>(d + 0x90)   = 1;
+    float* com = reinterpret_cast<float*>(d + 0x68);
+    for (int a = 0; a < 3; ++a) com[a] *= S[a];
+    *reinterpret_cast<float*>(d + 0x98) = std::sqrt(r2) + 0.2f;
+    b.mid = mid; b.lq = lq; b.tq = tq; b.used = tick;
+    b.model.store(model);
+    b.def.store(d, std::memory_order_release);
+    static int said = 0;
+    if (said++ < 12)
+        dlogf("log body %u: %u:%u's %d shape(s) %.2f x %.2f x %.2f, drawn x%.2f long x%.2f thick: a %.2f x %.2f x %.2f box", k, mid & 0xFFFF,
+              mid >> 16, sn, mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2], lenS, thickS, he[0] * 2, he[1] * 2, he[2] * 2);
+    return LOG_BODY_FIRST + k;
+}
+
 void spawn_log(const PendingLog& p) {
     uint8_t* mgr   = p.mgr;
     uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
@@ -1794,6 +1901,17 @@ void spawn_log(const PendingLog& p) {
             objId = 0xFFFF0000u | POLE_BODY_DEF;
         }
     }
+    // a log: a body the size of the log as it's drawn
+    if (!p.pole && g_logOwnBody && logModel.def != 0xFFFF) {
+        LogCandidate lk = pick_look(table, logModel);
+        if (lk.def < 0xFFFE) {
+            uint32_t lmid = ((uint32_t)lk.piece << 16) | lk.def;
+            int got = o_defModel(table, lmid);
+            float lk1 = 1, tk1 = 1;
+            look_factors(table, got, &lk1, &tk1);
+            if (uint32_t bid = log_body_def(table, lmid, p.length * lk1, p.thick * tk1, got)) objId = 0xFFFF0000u | bid;
+        }
+    }
     slot = reinterpret_cast<SpawnObjectFn>(g_base + 0x369690)(mgr, 0, objId, slot, pos, rot, 0, nullptr);
     if (slot < 0) { dlogf("log %d: spawn refused", p.n); return; }
     uint8_t* obj = reinterpret_cast<uint8_t**>(vec_at(mgr + 0x290)->first)[slot];
@@ -1838,6 +1956,10 @@ void spawn_log(const PendingLog& p) {
         int got = o_defModel(table, mid);
         look_factors(table, got, &lenK, &thickK);
         renderDef = render_def_for(table, mid, std::max(std::max(g_logLength, g_logLengthMax) * lenK, g_logThickness * thickK) + 1.0f, false);
+        // with a body of its own, it's drawn around that from the start (its centre of mass is the look's, scaled)
+        const uint32_t olo = objId & 0xFFFF;
+        if (renderDef && olo >= LOG_BODY_FIRST && olo < LOG_BODY_FIRST + LOG_BODY_COUNT)
+            if (uint8_t* bd = g_logBodies[olo - LOG_BODY_FIRST].def.load()) renderDef = bd;
         if (renderDef) {
             g_logRenderDef.store(renderDef);
             model = got;
@@ -1984,6 +2106,18 @@ bool sread(uint64_t p, void* out, size_t n) {
     return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(p), out, n, &got) && got == n;
 }
 template <class T> T srd(uint64_t p) { T v{}; sread(p, &v, sizeof v); return v; }
+std::string hexdump(const uint8_t* p, size_t n) {
+    std::string s;
+    char b[4];
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t v = 0;
+        if (!sread(reinterpret_cast<uint64_t>(p) + i, &v, 1)) return s + "(unreadable)";
+        std::snprintf(b, sizeof b, "%02x", v);
+        s += b;
+        if ((i & 7) == 7 && i + 1 < n) s += ' ';
+    }
+    return s;
+}
 
 // strict: 1 only when the track presentation is known and the model's resource is there
 int model_loaded(uint8_t* tp, int model) {
@@ -3265,6 +3399,7 @@ void load_settings() {
     g_ownModels   = GetPrivateProfileIntW(L"WreckingBall", L"OwnModels", 1, ini.c_str());
     g_poleOwnModel = GetPrivateProfileIntW(L"WreckingBall", L"PoleOwnModel", 1, ini.c_str());
     g_poleOwnBody  = GetPrivateProfileIntW(L"WreckingBall", L"PoleOwnBody", 1, ini.c_str());
+    g_logOwnBody   = GetPrivateProfileIntW(L"WreckingBall", L"LogOwnBody", 1, ini.c_str());
     {
         GetPrivateProfileStringW(L"WreckingBall", L"SolidModels", L"8616", big, 128, ini.c_str());
         g_solidOn = GetPrivateProfileIntW(L"WreckingBall", L"SolidPylons", 1, ini.c_str());
