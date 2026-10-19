@@ -48,11 +48,12 @@ int g_bigTreeDef  = 98;
 int g_logLibs     = 1;
 int g_maxLogLines = 4000;
 char g_prefix[256] = "*";
-char g_sizeRules[512] = "Bush_:0.5,Crop_:0.7,Skinny:0.8,Palm:0.9,Pine:1.3,Tall:1.3,Trees_:1.0";
+char g_sizeRules[512] = "Bush_:0.5,Crop_:0.7,VINEYARD_:0.5,Skinny:0.8,Palm:0.9,Pine:1.3,Tall:1.3,Trees_:1.0";
 // Bushes and crops: models whose name contains one of these break as BushDef (the game's own
 // flattening bush: a small foliage puff, no pieces, no log, no Lumberjack). "Bush_" doesn't match
-// the olive trees ("Trees_Olive_A_Bushy").
-char g_bushModels[256] = "Bush_,Crop_";
+// the olive trees ("Trees_Olive_A_Bushy"). The vineyard rows (VINEYARD_*) are vines on little
+// wooden stakes: they flatten like bushes rather than throwing a log.
+char g_bushModels[256] = "Bush_,Crop_,VINEYARD_";
 char g_skipModels[256] = "";   // models that stay solid, as without the mod
 int g_bushDef = 110;           // GEN_OBJ_Bush_Flatten; 0 = bushes break like trees (1.1 behaviour)
 float g_bushSpeedLoss = 0.04f; // fixed share of speed a bush takes; below 0 = by size, like trees
@@ -2740,7 +2741,7 @@ const char* const DEFAULT_INI =
     "; ---- bushes and crops ----\r\n"
     "; models whose name contains one of these flatten like the game's own bushes: a small puff of leaves,\r\n"
     "; no log, no Lumberjack (empty = they break like trees)\r\n"
-    "BushModels=Bush_,Crop_\r\n"
+    "BushModels=Bush_,Crop_,VINEYARD_\r\n"
     "; share of your speed a bush takes\r\n"
     "BushSpeedLoss=0.04\r\n"
     "; models whose name contains one of these stay solid, as without the mod\r\n"
@@ -2826,7 +2827,7 @@ void load_settings() {
     GetPrivateProfileStringW(L"WreckingBall", L"Prefix", L"*", big, 512, ini.c_str());
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_prefix, sizeof g_prefix, nullptr, nullptr);
     if (!std::strcmp(g_prefix, "Trees_")) std::strcpy(g_prefix, "*"); // 0.1-0.4 default: now everything
-    GetPrivateProfileStringW(L"WreckingBall", L"SizeRules", L"Bush_:0.5,Crop_:0.7,Skinny:0.8,Palm:0.9,Pine:1.3,Tall:1.3,Trees_:1.0", big, 512, ini.c_str());
+    GetPrivateProfileStringW(L"WreckingBall", L"SizeRules", L"Bush_:0.5,Crop_:0.7,VINEYARD_:0.5,Skinny:0.8,Palm:0.9,Pine:1.3,Tall:1.3,Trees_:1.0", big, 512, ini.c_str());
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_sizeRules, sizeof g_sizeRules, nullptr, nullptr);
     g_sizeTiers      = GetPrivateProfileIntW(L"WreckingBall", L"SizeTiers", 0, ini.c_str());
     g_massScale      = getf(L"MassScale", 4.0f);
@@ -2847,7 +2848,8 @@ void load_settings() {
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bigTreeEffects, sizeof g_bigTreeEffects, nullptr, nullptr);
     GetPrivateProfileStringW(L"WreckingBall", L"TreeEffects", L"", big, 512, ini.c_str());
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_treeEffects, sizeof g_treeEffects, nullptr, nullptr);
-    GetPrivateProfileStringW(L"WreckingBall", L"BushModels", L"Bush_,Crop_", big, 512, ini.c_str());
+    GetPrivateProfileStringW(L"WreckingBall", L"BushModels", L"Bush_,Crop_,VINEYARD_", big, 512, ini.c_str());
+    if (std::wcscmp(big, L"Bush_,Crop_") == 0) std::wcscpy(big, L"Bush_,Crop_,VINEYARD_");   // the old default: vineyards were trees
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bushModels, sizeof g_bushModels, nullptr, nullptr);
     GetPrivateProfileStringW(L"WreckingBall", L"SkipModels", L"", big, 512, ini.c_str());
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_skipModels, sizeof g_skipModels, nullptr, nullptr);
