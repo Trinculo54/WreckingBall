@@ -56,6 +56,20 @@ char g_sizeRules[512] = "Bush_:0.5,Crop_:0.7,VINEYARD_:0.5,Skinny:0.8,Palm:0.9,P
 char g_bushModels[256] = "Bush_,Crop_,VINEYARD_";
 char g_skipModels[256] = "";   // models that stay solid, as without the mod
 int g_bushDef = 110;           // GEN_OBJ_Bush_Flatten; 0 = bushes break like trees (1.1 behaviour)
+// The game's own breakable definitions that are plants, not trees: they break as the game made
+// them, but like a bush (no log, the bush slowdown). 266 is VEG_Crops_vineyardB_Low_SegB, the
+// vineyard row the game itself made breakable (the other vineyard rows are BushModels).
+char g_bushDefs[64] = "266";
+int nd(uint8_t* table, int def);
+bool bush_like_def(uint8_t* defTable, int lo) {
+    for (const char* r = g_bushDefs; *r;) {
+        while (*r == ' ' || *r == ',') ++r;
+        if (!*r) break;
+        if (lo == nd(defTable, std::atoi(r))) return true;
+        while (*r && *r != ',') ++r;
+    }
+    return false;
+}
 float g_bushSpeedLoss = 0.04f; // fixed share of speed a bush takes; below 0 = by size, like trees
 char g_bushEffects[256] = "";  // extra effects on top of the bush's own puff
 int g_sizeTiers = 0;
@@ -2688,7 +2702,7 @@ void d_onCollision(uint8_t* obj, void* contact) {
             float loss = 0, before_mph = 0, after_mph = 0;
             float carVel[4] = {0, 0, 0, 0};
             uint8_t* defTable = *reinterpret_cast<uint8_t**>(*reinterpret_cast<uint8_t**>(obj + 0x40) + 0x4C8);
-            if (g_bushDef > 0 && (int)lo == nd(defTable, g_bushDef)) {
+            if ((g_bushDef > 0 && (int)lo == nd(defTable, g_bushDef)) || bush_like_def(defTable, (int)lo)) {
                 // a bush or crop: its own puff and sound come with BushDef; no log, no Lumberjack
                 apply_speed_loss(contact, size, &loss, &before_mph, &after_mph, carVel, g_bushSpeedLoss);
                 if (*g_bushEffects) spawn_effects(*reinterpret_cast<uint8_t**>(obj + 0x40), g_bushEffects, x, y, z, carVel);
@@ -2856,6 +2870,11 @@ void load_settings() {
     GetPrivateProfileStringW(L"WreckingBall", L"BushEffects", L"", big, 512, ini.c_str());
     WideCharToMultiByte(CP_UTF8, 0, big, -1, g_bushEffects, sizeof g_bushEffects, nullptr, nullptr);
     g_bushDef       = GetPrivateProfileIntW(L"WreckingBall", L"BushDef", 110, ini.c_str());
+    {
+        wchar_t w[64];
+        GetPrivateProfileStringW(L"WreckingBall", L"BushDefs", L"266", w, 64, ini.c_str());
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, g_bushDefs, sizeof g_bushDefs, nullptr, nullptr);
+    }
     g_bushSpeedLoss = getf(L"BushSpeedLoss", 0.04f);
     g_barriers          = GetPrivateProfileIntW(L"WreckingBall", L"Barriers", 1, ini.c_str());
     g_barrierSkipEvents = GetPrivateProfileIntW(L"WreckingBall", L"BarrierSkipEvents", 1, ini.c_str());
