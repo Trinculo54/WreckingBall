@@ -1667,7 +1667,7 @@ uint8_t* pole_own_def(uint8_t* table, uint32_t id, float half) {
 // 0x142EB5BD8) whose collision is a single box the size of the pole, centred on the body.
 // A definition's collision is a list of shapes: +0x80 points to their pointers, +0x90 is how
 // many (serialised at 0x1412DCC80). A shape starts with its type (0 sphere, 1 box, 2 convex hull,
-// 4 point cloud) and flags (bit 1: it collides), and a box has a transform at +0x10 and half
+// 5 point cloud) and flags (bit 1: it collides), and a box has a transform at +0x10 and half
 // extents at +0x50 (0x60 bytes). A rigid body takes its collision shapes from its definition each
 // time one is made (0x1412D2850, called for every spawn), so the copy's box is the pole's body.
 // The centre of mass is the body's own centre; the pole is drawn half a pole below it (see
@@ -1709,11 +1709,13 @@ uint8_t* pole_body_def(uint8_t* table, uint32_t srcId, float half) {
     return d;
 }
 
-// A log's own body: one box around the collision shapes of the trunk piece it's drawn with,
+// A log's own body: one box around the collision shapes of the trunk piece it's drawn with
+// (the trunks' are point clouds),
 // scaled the way the log is drawn (thickS across, lenS along its length, the body's Y), with
 // the centre of mass scaled the same way so the model stays on it. Only box and sphere shapes
 // are understood; a piece with any other kind keeps the old body (and is dumped once, with
 // Debug=1). Returns the id (low 16 bits) or 0.
+// Shape types, as serialised (0x1412DCC80): 0 sphere, 1 box, 2 convex hull, 5 point cloud.
 std::string hexdump(const uint8_t* p, size_t n);
 uint32_t log_body_def(uint8_t* table, uint32_t mid, float lenS, float thickS, int model) {
     static std::mutex lock;
@@ -1749,6 +1751,12 @@ uint32_t log_body_def(uint8_t* table, uint32_t mid, float lenS, float thickS, in
                 mn[a] = std::min(mn[a], t[12 + a] - e);
                 mx[a] = std::max(mx[a], t[12 + a] + e);
             }
+        } else if (sh[0] == 5) {   // point cloud: +0x10 count, +8 -> the points (float4, from +0x30)
+            const uint32_t np = *reinterpret_cast<const uint32_t*>(sh + 0x10);
+            const float* pts  = *reinterpret_cast<const float* const*>(sh + 8);
+            if (np == 0 || np > 4096 || !readable(pts, (size_t)np * 16)) { ok = false; break; }
+            for (uint32_t i2 = 0; i2 < np; ++i2)
+                for (int a = 0; a < 3; ++a) { mn[a] = std::min(mn[a], pts[i2 * 4 + a]); mx[a] = std::max(mx[a], pts[i2 * 4 + a]); }
         } else if (sh[0] == 0) {   // sphere: position and radius
             const float* q = reinterpret_cast<const float*>(sh + 0x10);
             for (int a = 0; a < 3; ++a) { mn[a] = std::min(mn[a], q[a] - q[3]); mx[a] = std::max(mx[a], q[a] + q[3]); }
