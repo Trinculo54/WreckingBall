@@ -3,7 +3,10 @@ name: Build
 # Every push and pull request builds the mod and uploads dist/ as an
 # artifact. Pushing a version tag (v1.0.0, v1.2.3, ...) also attaches
 # WreckingBall-<tag>.zip to the release with that name (a new draft if
-# there isn't one yet), unless a zip is already attached.
+# there isn't one yet), unless a zip is already attached. The zip holds
+# mods/wreckingball/ (mod.json, WreckingBall.dll, README.txt, LICENSE.txt),
+# so it extracts straight into the Azimuth folder and the FH2ML Manager's
+# Install mod takes it as it is.
 
 on:
   push:
@@ -26,7 +29,6 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-          submodules: true
 
       - name: Install llvm-mingw + ninja
         run: |
@@ -43,8 +45,9 @@ jobs:
       - name: Name the build
         id: name
         run: |
-          # The version in CMakeLists.txt is what the mod reports and compares
-          # against GitHub; a release tag has to match it.
+          # The version in CMakeLists.txt is what the mod reports (and what its
+          # mod.json says) and what FH2ML compares against GitHub; a release tag
+          # has to match it.
           version=$(sed -n 's/^project([^ ]* VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           echo "CMakeLists.txt version: $version"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
