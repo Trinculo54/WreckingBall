@@ -2524,9 +2524,42 @@ uint8_t* real_presentation(uint8_t* mgr) {
     }
     return nullptr;
 }
+// Where the CPresentation keeps its CTrackPresentation: found by looking through it for a pointer
+// to an object with CTrackPresentation's vtable (0x142EB8590), directly or one pointer deeper, and
+// remembered once found. (+0x38 was a guess that didn't hold.)
+int g_tpOff = -1, g_tpOff2 = -1;
+uint8_t* tp_in(uint8_t* real) {
+    const uint64_t r = reinterpret_cast<uint64_t>(real), want = g_base + 0x2EB8590;
+    auto is_tp = [&](uint64_t q) { return q > 0x10000 && !(q & 7) && srd<uint64_t>(q) == want; };
+    if (g_tpOff >= 0) {
+        uint64_t q = srd<uint64_t>(r + g_tpOff);
+        if (g_tpOff2 >= 0) q = q ? srd<uint64_t>(q + g_tpOff2) : 0;
+        return is_tp(q) ? reinterpret_cast<uint8_t*>(q) : nullptr;
+    }
+    for (int o = 0; o < 0x800; o += 8)
+        if (is_tp(srd<uint64_t>(r + o))) {
+            g_tpOff = o;
+            logf("track presentation: CPresentation+0x%X", o);
+            return reinterpret_cast<uint8_t*>(srd<uint64_t>(r + o));
+        }
+    static int deep = 0;   // one pointer deeper: costlier, so only now and then
+    if (deep++ % 20) return nullptr;
+    for (int o = 0; o < 0x400; o += 8) {
+        uint64_t p = srd<uint64_t>(r + o);
+        if (p < 0x10000 || (p & 7)) continue;
+        for (int o2 = 0; o2 < 0x200; o2 += 8)
+            if (is_tp(srd<uint64_t>(p + o2))) {
+                g_tpOff = o; g_tpOff2 = o2;
+                logf("track presentation: CPresentation+0x%X -> +0x%X", o, o2);
+                return reinterpret_cast<uint8_t*>(srd<uint64_t>(p + o2));
+            }
+    }
+    return nullptr;
+}
+
 uint8_t* track_presentation(uint8_t* mgr) {
     uint8_t* real = real_presentation(mgr);
-    uint8_t* tp = real ? *reinterpret_cast<uint8_t**>(real + 0x38) : nullptr;
+    uint8_t* tp = real ? tp_in(real) : nullptr;
     if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10) && *reinterpret_cast<uintptr_t*>(tp) == g_base + 0x2EB8590) {
         // so "is this model loaded" can answer before anything has been bound (and after a map change)
         if (g_trackPres.exchange(tp) != tp) dlogf("track presentation %p found", tp);
@@ -2534,7 +2567,23 @@ uint8_t* track_presentation(uint8_t* mgr) {
     }
     // fall back on the one seen binding a loose piece
     tp = g_trackPres.load();
-    if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10)) return tp;
+    if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10)) {
+        static bool told = false;   // once: where it actually is, for the next build
+        if (real && g_tpOff < 0 && !std::exchange(told, true)) {
+            const uint64_t r = reinterpret_cast<uint64_t>(real), want = reinterpret_cast<uint64_t>(tp);
+            bool found = false;
+            for (int o = 0; o < 0x2000 && !found; o += 8)
+                if (srd<uint64_t>(r + o) == want) { logf("track presentation %p is at CPresentation+0x%X", tp, o); found = true; }
+            for (int o = 0; o < 0x400 && !found; o += 8) {
+                uint64_t q = srd<uint64_t>(r + o);
+                for (int o2 = 0; q > 0x10000 && !(q & 7) && o2 < 0x400 && !found; o2 += 8)
+                    if (srd<uint64_t>(q + o2) == want) { logf("track presentation %p is at CPresentation+0x%X -> +0x%X", tp, o, o2); found = true; }
+            }
+            if (!found) logf("track presentation %p isn't within two pointers of the CPresentation at %p (vtable +%llX)", tp, real,
+                             (unsigned long long)(srd<uint64_t>(r) - g_base));
+        }
+        return tp;
+    }
     static int diag = 0;
     if (diag++ % 600 == 0 && diag < 3000) {
         uint8_t* pres = *reinterpret_cast<uint8_t**>(mgr + 0x10);
