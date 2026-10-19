@@ -1604,7 +1604,7 @@ uint8_t* render_def_for(uint8_t* table, uint32_t mid, float scale, bool pole) {
     return d;
 }
 // A render-only copy of the falling pole's body definition for drawing the pole's own model:
-// centre of mass halfway up (the bind draws the model offset by minus it from the body) and a
+// the base half a pole below the body (see the centre of mass below) and a
 // culling radius that covers the whole pole. One per half height, to a centimetre.
 uint8_t* pole_own_def(uint8_t* table, uint32_t id, float half) {
     struct Entry { uint32_t id; int h; uint8_t* def; };
@@ -1617,8 +1617,11 @@ uint8_t* pole_own_def(uint8_t* table, uint32_t id, float half) {
     uint8_t* d = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!d) return nullptr;
     std::memcpy(d, md, DEF_SIZE);
+    // The game places a body at its model's origin minus the centre of mass (SpawnCell,
+    // 0x1403690A2) and draws the model back at the body plus it, so a model that starts at its
+    // base, drawn on a body centred halfway up, wants the centre of mass at minus half the height.
     float* com = reinterpret_cast<float*>(d + 0x68);
-    com[0] = 0; com[1] = half; com[2] = 0;
+    com[0] = 0; com[1] = -half; com[2] = 0;
     float* radius = reinterpret_cast<float*>(d + 0x98);
     *radius = std::max(*radius, half + 1.5f);
     cache[n++] = Entry{id, hq, d};
@@ -1705,8 +1708,8 @@ void spawn_log(const PendingLog& p) {
     uint8_t* renderDef = nullptr;
     float lenK = 1.0f, thickK = 1.0f;
     if (own) {
-        // the pole's own model, bound with a copy of the body's definition whose centre of mass
-        // is halfway up the pole (the model starts at its base) and whose culling radius covers it
+        // the pole's own model, bound with a copy of the body's definition that puts the model's
+        // base half a pole below the body and whose culling radius covers it
         renderDef = pole_own_def(table, id, p.height * p.scale);
         if (renderDef) {
             g_poleRenderDef.store(renderDef);
