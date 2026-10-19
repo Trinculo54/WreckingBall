@@ -397,6 +397,17 @@ void patch_big_def(uint8_t* table) {
 
 // render-only definition for logs drawn with another model (see spawn_log)
 constexpr uint32_t LOG_RENDER_DEF = 0xF0FF, POLE_RENDER_DEF = 0xF0FE;
+// A falling pole drawn with its own model gets a body of its own: a copy of a pole piece's
+// definition whose collision is one box the size of the pole (see pole_body_def), looked up
+// under this id for as long as the pole lives.
+constexpr uint32_t POLE_BODY_DEF = 0xF0FD;
+std::atomic<uint8_t*> g_poleBodyDef{nullptr};
+std::atomic<int> g_poleBodyModel{-1};   // the model its last pole was drawn with
+// Logs get bodies of their own the same way, sized to each log as it's drawn: a pool of ids,
+// one per log look and size (to a quarter of the stretch), reused oldest first (log_body_def).
+constexpr uint32_t LOG_BODY_FIRST = 0xF080, LOG_BODY_COUNT = 0x7C;   // 0xF080..0xF0FB
+struct LogBody { std::atomic<uint8_t*> def{nullptr}; std::atomic<int> model{-1}; uint32_t mid; int lq, tq; uint64_t used; };
+LogBody g_logBodies[LOG_BODY_COUNT];
 std::atomic<uint8_t*> g_logRenderDef{nullptr}, g_poleRenderDef{nullptr};
 
 uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
@@ -404,6 +415,14 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
     if (lo == POLE_RENDER_DEF) {
         if (uint8_t* d = g_poleRenderDef.load(std::memory_order_acquire)) return d;
         return o_defLookup(table, (id & 0xFFFF0000u) | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
+    }
+    if (lo >= LOG_BODY_FIRST && lo < LOG_BODY_FIRST + LOG_BODY_COUNT) {
+        if (uint8_t* d = g_logBodies[lo - LOG_BODY_FIRST].def.load(std::memory_order_acquire)) return d;
+        return o_defLookup(table, 0xFFFF0000u | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
+    }
+    if (lo == POLE_BODY_DEF) {
+        if (uint8_t* d = g_poleBodyDef.load(std::memory_order_acquire)) return d;
+        return o_defLookup(table, 0xFFFF0000u | (uint32_t)(nd(table, 28) < 0 ? 28 : nd(table, 28)));
     }
     if (lo == LOG_RENDER_DEF) {
         if (uint8_t* d = g_logRenderDef.load(std::memory_order_acquire)) return d;
@@ -425,6 +444,9 @@ uint8_t* d_defLookup(uint8_t* table, uint32_t id) {
 
 int d_defModel(uint8_t* table, uint32_t id) {
     uint32_t lo = id & 0xFFFF;
+    if (lo == POLE_BODY_DEF && g_poleBodyModel.load(std::memory_order_relaxed) >= 0) return g_poleBodyModel.load(std::memory_order_relaxed);
+    if (lo >= LOG_BODY_FIRST && lo < LOG_BODY_FIRST + LOG_BODY_COUNT && g_logBodies[lo - LOG_BODY_FIRST].model.load() >= 0)
+        return g_logBodies[lo - LOG_BODY_FIRST].model.load();
     if (lo >= (uint32_t)CLONE_BASE && lo < (uint32_t)(CLONE_BASE + NUM_TIERS))
         return o_defModel(table, (id & 0xFFFF0000u) | (uint32_t)(tree_def(table, false) & 0xFFFF));
     return o_defModel(table, id);
@@ -1505,10 +1527,25 @@ int g_logs = 1, g_logCycle = 1, g_logAxis = 1;
 float g_logLengthJitter = 0.25f, g_logLengthSizeExp = 1.0f, g_logLengthMin = 1.5f, g_logLengthMax = 5.0f;
 float g_logLength = 1.0f, g_logThickness = 1.0f, g_logMinSize = 1.6f, g_logHeight = 1.0f, g_logAhead = 0.0f, g_logSpeed = 0.7f, g_logUp = 2.0f, g_logSpin = 3.0f,
       g_logTilt = 90.0f;
+// LogFromCar: a log appears standing just ahead of the car, leaning forward, so the nose knocks
+// it over, instead of at the tree, a metre up, where the car ran under it and carried it on its
+// roof. LogCarAhead: metres ahead of the car's centre; LogCarHeight: its base's clearance over
+// the ground; LogCarTilt: its forward lean (degrees); LogCarUp: its upward speed (m/s).
+int g_logFromCar = 1;
+float g_logCarAhead = 3.0f, g_logCarHeight = 0.1f, g_logCarUp = 0.0f, g_logCarTilt = 8.0f;
 std::atomic<int> g_logNext{0}, g_logsSpawned{0};
 
 struct PendingLog { uint8_t* mgr; float x, y, z, vx, vy, vz; uint8_t key[16]; uint32_t b0, b4; LogCandidate c; int n; float length;
-                    bool pole; float thick, tilt, spin, speedK, up, height; };
+                    bool pole; float thick, tilt, spin, speedK, up, height;
+                    int ownModel; float r0[9], scale; };   // a pole's own model, rotation rows (unit) and scale; ownModel -1: none
+int g_poleOwnModel = 1;   // PoleOwnModel: a falling pole is drawn with the pole's own model
+// PoleBody: the breakable piece that is a pole drawn with its own model's physics body. The large
+// triple street light's main pole (91:0, ~8.7 m: bounding radius 4.36) is as long as a telephone
+// pole; the arched street light's 28:3 is only ~3 m, so a pole's ends went through the ground
+// and the car. Falls back on 28:3 where a map hasn't got it.
+LogCandidate g_poleBody{91, 0};
+int g_logOwnBody = 1;    // LogOwnBody: a log's body is a box the size of the log as it's drawn
+int g_poleOwnBody = 1;   // PoleOwnBody: such a pole's body is a box the size of the pole (pole_body_def)
 std::mutex g_pendLock;
 PendingLog g_pend[16];
 int g_nPend = 0;
@@ -1584,7 +1621,7 @@ using BodyIntFn     = void (*)(void* body, int v);
 using BodyWakeFn    = void (*)(void* body, int a, int b);
 using ObjVecFn      = void (*)(uint8_t* obj, const float* v);
 
-void track_log(int slot, uint8_t* obj, uint32_t id, float length, float thick);
+void track_log(int slot, uint8_t* obj, uint32_t id, float length, float thick, float down);
 // a render-only copy of a piece's definition with its culling radius scaled, one per piece and use
 uint8_t* render_def_for(uint8_t* table, uint32_t mid, float scale, bool pole) {
     struct Entry { uint32_t mid; bool pole; uint8_t* def; };
@@ -1601,12 +1638,225 @@ uint8_t* render_def_for(uint8_t* table, uint32_t mid, float scale, bool pole) {
     dlogf("%s drawn with model %d (%u:%u)", pole ? "falling poles can be" : "logs can be", o_defModel(table, mid), mid & 0xFFFF, mid >> 16);
     return d;
 }
+// A render-only copy of the falling pole's body definition for drawing the pole's own model:
+// the base half a pole below the body (see the centre of mass below) and a
+// culling radius that covers the whole pole. One per half height, to a centimetre.
+uint8_t* pole_own_def(uint8_t* table, uint32_t id, float half) {
+    struct Entry { uint32_t id; int h; uint8_t* def; };
+    static Entry cache[64];
+    static int n = 0;
+    const int hq = (int)std::lround(half * 100.0f);
+    for (int k = 0; k < n; ++k) if (cache[k].id == id && cache[k].h == hq) return cache[k].def;
+    uint8_t* md = o_defLookup(table, id);
+    if (!md || !readable(md, DEF_SIZE) || n >= 64) return nullptr;
+    uint8_t* d = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!d) return nullptr;
+    std::memcpy(d, md, DEF_SIZE);
+    // The game places a body at its model's origin minus the centre of mass (SpawnCell,
+    // 0x1403690A2) and draws the model back at the body plus it, so a model that starts at its
+    // base, drawn on a body centred halfway up, wants the centre of mass at minus half the height.
+    float* com = reinterpret_cast<float*>(d + 0x68);
+    com[0] = 0; com[1] = -half; com[2] = 0;
+    float* radius = reinterpret_cast<float*>(d + 0x98);
+    *radius = std::max(*radius, half + 1.5f);
+    cache[n++] = Entry{id, hq, d};
+    return d;
+}
+
+// A definition's own physics numbers (named by CPhysicsDefinition's serialiser, 0x1412DAEE0):
+// +0x08 InertiaTensor and +0x2C InverseInertiaTensor (3x3 each), +0x50 HalfExtents and +0x5C
+// AabbCentreOffset (its bounds), +0x68 GraphicsOffset (where the model is drawn from the body),
+// +0x94 NumChildren, +0x98 BoundingRadius, +0x9C Mass. A rigid body is made from these along
+// with the shapes, so a copy with a box of another size needs them for that box, or it turns
+// like the piece it was copied from (logs four times that piece's length jittered on the ground).
+void set_box_physics(uint8_t* d, const float* centre, const float* half) {
+    const float m = *reinterpret_cast<float*>(d + 0x9C);
+    const float x = 2 * half[0], y = 2 * half[1], z = 2 * half[2];
+    const float I[3] = {m / 12 * (y * y + z * z), m / 12 * (x * x + z * z), m / 12 * (x * x + y * y)};
+    float* it = reinterpret_cast<float*>(d + 0x08);
+    float* iv = reinterpret_cast<float*>(d + 0x2C);
+    if (g_debug) {
+        static int said = 0;
+        if (said++ < 6)
+            dlogf("  copied inertia diag %.4f %.4f %.4f (inverse %.2f %.2f %.2f), half extents %.2f %.2f %.2f; the box's: %.4f %.4f %.4f", it[0], it[4],
+                  it[8], iv[0], iv[4], iv[8], *reinterpret_cast<float*>(d + 0x50), *reinterpret_cast<float*>(d + 0x54),
+                  *reinterpret_cast<float*>(d + 0x58), I[0], I[1], I[2]);
+    }
+    for (int k = 0; k < 9; ++k) it[k] = iv[k] = 0;
+    for (int a = 0; a < 3; ++a) {
+        it[a * 4] = I[a];
+        iv[a * 4] = I[a] > 1e-6f ? 1.0f / I[a] : 0;
+    }
+    float* he = reinterpret_cast<float*>(d + 0x50);
+    float* co = reinterpret_cast<float*>(d + 0x5C);
+    for (int a = 0; a < 3; ++a) { he[a] = half[a]; co[a] = centre[a]; }
+}
+
+// A pole's own body: a copy of a pole piece's definition (CCollObjPhysicsDefinition, vtable
+// 0x142EB5BD8) whose collision is a single box the size of the pole, centred on the body.
+// A definition's collision is a list of shapes: +0x80 points to their pointers, +0x90 is how
+// many (serialised at 0x1412DCC80). A shape starts with its type (0 sphere, 1 box, 2 convex hull,
+// 5 point cloud) and flags (bit 1: it collides), and a box has a transform at +0x10 and half
+// extents at +0x50 (0x60 bytes). A rigid body takes its collision shapes from its definition each
+// time one is made (0x1412D2850, called for every spawn), so the copy's box is the pole's body.
+// The centre of mass is the body's own centre; the pole is drawn half a pole below it (see
+// d_nodeUpdate). One per half height, to a centimetre.
+uint8_t* pole_body_def(uint8_t* table, uint32_t srcId, float half) {
+    struct Entry { int h; uint8_t* def; };
+    static Entry cache[16];
+    static int n = 0;
+    const int hq = (int)std::lround(half * 100.0f);
+    for (int k = 0; k < n; ++k) if (cache[k].h == hq) return cache[k].def;
+    uint8_t* src = o_defLookup(table, srcId);
+    if (!src || !readable(src, DEF_SIZE) || *reinterpret_cast<uintptr_t*>(src) != g_base + 0x2EB5BD8 || n >= 16) return nullptr;
+    uint8_t flags = 0x05;   // collides (1), and 4 like the game's pieces
+    int sn = *reinterpret_cast<int32_t*>(src + 0x90);
+    uint8_t** sa = *reinterpret_cast<uint8_t***>(src + 0x80);
+    if (sn > 0 && readable(sa, 8) && readable(sa[0], 2)) flags = sa[0][1];
+    if (!(flags & 1)) flags |= 1;
+    uint8_t* d = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!d) return nullptr;
+    std::memcpy(d, src, DEF_SIZE);
+    uint8_t** arr = reinterpret_cast<uint8_t**>(d + 0x400);
+    uint8_t* box  = d + 0x440;   // 16-aligned: its matrix and extents are read with aligned loads
+    std::memset(box, 0, 0x60);
+    box[0] = 1;                  // box
+    box[1] = flags;
+    float* m = reinterpret_cast<float*>(box + 0x10);
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+    float* he = reinterpret_cast<float*>(box + 0x50);
+    he[0] = 0.16f; he[1] = half; he[2] = 0.16f; he[3] = 0;
+    arr[0] = box;
+    *reinterpret_cast<uint8_t***>(d + 0x80) = arr;
+    *reinterpret_cast<int32_t*>(d + 0x90)   = 1;
+    float* com = reinterpret_cast<float*>(d + 0x68);
+    com[0] = com[1] = com[2] = 0;
+    *reinterpret_cast<float*>(d + 0x98) = half + 0.5f;   // culling / broad-phase radius
+    const float centre[3] = {0, 0, 0}, hx[3] = {0.16f, half, 0.16f};
+    set_box_physics(d, centre, hx);
+    cache[n++] = Entry{hq, d};
+    dlogf("pole body: a %.2f m box (half extents 0.16 x %.2f x 0.16, flags 0x%02X), copied from definition %u:%u with %d shapes",
+          half * 2, half, flags, srcId & 0xFFFF, srcId >> 16, sn);
+    return d;
+}
+
+// A log's own body: one box around the collision shapes of the trunk piece it's drawn with
+// (the trunks' are point clouds),
+// scaled the way the log is drawn (thickS across, lenS along its length, the body's Y), with
+// the centre of mass scaled the same way so the model stays on it. Only box and sphere shapes
+// are understood; a piece with any other kind keeps the old body (and is dumped once, with
+// Debug=1). Returns the id (low 16 bits) or 0.
+// Shape types, as serialised (0x1412DCC80): 0 sphere, 1 box, 2 convex hull, 5 point cloud.
+std::string hexdump(const uint8_t* p, size_t n);
+uint32_t log_body_def(uint8_t* table, uint32_t mid, float lenS, float thickS, int model) {
+    static std::mutex lock;
+    std::lock_guard<std::mutex> l(lock);
+    static uint64_t tick = 0;
+    ++tick;
+    const int lq = (int)std::lround(lenS * 4), tq = (int)std::lround(thickS * 4);
+    int freeSlot = -1, oldest = 0;
+    for (uint32_t k = 0; k < LOG_BODY_COUNT; ++k) {
+        LogBody& b = g_logBodies[k];
+        if (b.def.load() && b.mid == mid && b.lq == lq && b.tq == tq) { b.used = tick; return LOG_BODY_FIRST + k; }
+        if (!b.def.load() && freeSlot < 0) freeSlot = (int)k;
+        if (b.used < g_logBodies[oldest].used) oldest = (int)k;
+    }
+    uint8_t* src = o_defLookup(table, mid);
+    if (!src || !readable(src, DEF_SIZE) || *reinterpret_cast<uintptr_t*>(src) != g_base + 0x2EB5BD8) return 0;
+    // the source's shapes: their bounds, in their own coordinates
+    float mn[3] = {1e9f, 1e9f, 1e9f}, mx[3] = {-1e9f, -1e9f, -1e9f};
+    uint8_t flags = 0;
+    int sn = *reinterpret_cast<int32_t*>(src + 0x90);
+    uint8_t** sa = *reinterpret_cast<uint8_t***>(src + 0x80);
+    bool ok = sn > 0 && sn < 16 && readable(sa, sizeof(void*) * sn);
+    static std::set<uint32_t> dumped;
+    for (int i = 0; ok && i < sn; ++i) {
+        uint8_t* sh = sa[i];
+        if (!readable(sh, 0x60)) { ok = false; break; }
+        flags |= sh[1];
+        if (sh[0] == 1) {   // box: centre + |R| * half extents
+            const float* t = reinterpret_cast<const float*>(sh + 0x10);
+            const float* h = reinterpret_cast<const float*>(sh + 0x50);
+            for (int a = 0; a < 3; ++a) {
+                float e = std::fabs(t[0 * 4 + a]) * h[0] + std::fabs(t[1 * 4 + a]) * h[1] + std::fabs(t[2 * 4 + a]) * h[2];
+                mn[a] = std::min(mn[a], t[12 + a] - e);
+                mx[a] = std::max(mx[a], t[12 + a] + e);
+            }
+        } else if (sh[0] == 5) {   // point cloud: +0x10 count, +8 -> the points (float4, from +0x30)
+            const uint32_t np = *reinterpret_cast<const uint32_t*>(sh + 0x10);
+            const float* pts  = *reinterpret_cast<const float* const*>(sh + 8);
+            if (np == 0 || np > 4096 || !readable(pts, (size_t)np * 16)) { ok = false; break; }
+            for (uint32_t i2 = 0; i2 < np; ++i2)
+                for (int a = 0; a < 3; ++a) { mn[a] = std::min(mn[a], pts[i2 * 4 + a]); mx[a] = std::max(mx[a], pts[i2 * 4 + a]); }
+        } else if (sh[0] == 0) {   // sphere: position and radius
+            const float* q = reinterpret_cast<const float*>(sh + 0x10);
+            for (int a = 0; a < 3; ++a) { mn[a] = std::min(mn[a], q[a] - q[3]); mx[a] = std::max(mx[a], q[a] + q[3]); }
+        } else {
+            ok = false;
+            if (g_debug && dumped.insert(mid).second) {
+                dlogf("log body: %u:%u has a shape of type %u (flags 0x%02X); keeping the old body. Its bytes: %s", mid & 0xFFFF, mid >> 16,
+                      sh[0], sh[1], hexdump(sh, 0x80).c_str());
+                for (int o = 0x50; o <= 0x68; o += 8) {
+                    uint8_t* q = *reinterpret_cast<uint8_t**>(sh + o);
+                    if (readable(q, 0x40)) dlogf("  +0x%X -> %s", o, hexdump(q, 0x40).c_str());
+                }
+            }
+        }
+    }
+    if (!ok || mn[0] > mx[0]) return 0;
+    const float S[3] = {thickS, lenS, thickS};
+    const uint32_t k = freeSlot >= 0 ? (uint32_t)freeSlot : (uint32_t)oldest;
+    LogBody& b = g_logBodies[k];
+    uint8_t* d = b.def.load();
+    if (!d) d = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!d) return 0;
+    // (a reused copy may still be some faded log's: the rigid body kept its own pointer to the
+    // shape, so the box is rewritten in place to a log of a similar size, never freed)
+    std::memcpy(d, src, DEF_SIZE);
+    uint8_t** arr = reinterpret_cast<uint8_t**>(d + 0x400);
+    uint8_t* box  = d + 0x440;
+    std::memset(box, 0, 0x60);
+    box[0] = 1;
+    box[1] = (uint8_t)(flags | 1);
+    float* m = reinterpret_cast<float*>(box + 0x10);
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+    float* he = reinterpret_cast<float*>(box + 0x50);
+    float r2 = 0;
+    for (int a = 0; a < 3; ++a) {
+        m[12 + a] = (mn[a] + mx[a]) * 0.5f * S[a];
+        he[a]     = std::max((mx[a] - mn[a]) * 0.5f * S[a], 0.05f);
+        r2 += (std::fabs(m[12 + a]) + he[a]) * (std::fabs(m[12 + a]) + he[a]);
+    }
+    arr[0] = box;
+    *reinterpret_cast<uint8_t***>(d + 0x80) = arr;
+    *reinterpret_cast<int32_t*>(d + 0x90)   = 1;
+    float* com = reinterpret_cast<float*>(d + 0x68);
+    for (int a = 0; a < 3; ++a) com[a] *= S[a];
+    *reinterpret_cast<float*>(d + 0x98) = std::sqrt(r2) + 0.2f;
+    set_box_physics(d, m + 12, he);
+    b.mid = mid; b.lq = lq; b.tq = tq; b.used = tick;
+    b.model.store(model);
+    b.def.store(d, std::memory_order_release);
+    static int said = 0;
+    if (said++ < 12)
+        dlogf("log body %u: %u:%u's %d shape(s) %.2f x %.2f x %.2f, drawn x%.2f long x%.2f thick: a %.2f x %.2f x %.2f box", k, mid & 0xFFFF,
+              mid >> 16, sn, mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2], lenS, thickS, he[0] * 2, he[1] * 2, he[2] * 2);
+    return LOG_BODY_FIRST + k;
+}
+
 void spawn_log(const PendingLog& p) {
     uint8_t* mgr   = p.mgr;
     uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
     // this map's numbers for the log's own piece and the looks it's drawn with
     const LogCandidate poleLook = nlc(table, g_poleLook), logModel = nlc(table, g_logModel);
     LogCandidate lc = nlc(table, p.c);
+    if (p.pole && p.ownModel > 0 && g_poleBody.def != 0xFFFF) {
+        LogCandidate pb = nlc(table, g_poleBody);
+        uint8_t* w = pb.def < 0xFFFE ? o_defLookup(table, 0xFFFF0000u | pb.def) : nullptr;
+        if (w && *reinterpret_cast<uintptr_t*>(w) == g_base + 0x2EB5BD8 &&
+            (pb.piece == 0xFFFF || pb.piece < *reinterpret_cast<uint32_t*>(w + 0x94)))
+            lc = pb;
+    }
     if (lc.def == 0xFFFE) {
         // the piece that's normally its body (the wooden pylon's pole, 28:3) isn't on this map
         // (Storm Island): the trunk it's drawn with is its body instead
@@ -1621,6 +1871,7 @@ void spawn_log(const PendingLog& p) {
         lc = look;
     }
     uint32_t id    = ((uint32_t)lc.piece << 16) | lc.def;
+    const bool ownWanted = p.pole && p.ownModel > 0 && g_logAxis == 1;
     // the definition and piece must exist
     uint8_t* whole = o_defLookup(table, 0xFFFF0000u | lc.def);
     if (!whole || *reinterpret_cast<uintptr_t*>(whole) != g_base + 0x2EB5BD8) { dlogf("log %d: %u is not a definition", p.n, lc.def); return; }
@@ -1639,7 +1890,9 @@ void spawn_log(const PendingLog& p) {
     float sp = std::sqrt(p.vx * p.vx + p.vz * p.vz);
     float fx = 1, fz = 0;
     if (sp > 0.5f) { fx = p.vx / sp; fz = p.vz / sp; }
-    float t = p.tilt * 3.14159265f / 180.0f, ct = std::cos(t), st = std::sin(t);
+    // a log from the car stands up just ahead of it, leaning LogCarTilt degrees forward
+    const bool fromCar = !p.pole && g_logFromCar && sp > 2.0f;
+    float t = (fromCar ? g_logCarTilt : p.tilt) * 3.14159265f / 180.0f, ct = std::cos(t), st = std::sin(t);
     float a[3] = {st * fx, ct, st * fz};   // long axis
     float b[3] = {fz, 0, -fx};            // side (horizontal, perpendicular to travel)
     float c[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
@@ -1650,8 +1903,56 @@ void spawn_log(const PendingLog& p) {
         rot[row * 4 + 0] = basis[k][0]; rot[row * 4 + 1] = basis[k][1]; rot[row * 4 + 2] = basis[k][2];
     }
     alignas(16) float pos[4] = {p.x + fx * g_logAhead, p.y + p.height, p.z + fz * g_logAhead, 1};
+    if (fromCar) {
+        // standing on its base: the car's centre is about 0.45 m above the ground; the centre of
+        // the body goes half the log up from there (at least half the body's own shape, about
+        // 3.2 m long, so it never starts in the ground), plus LogCarHeight of clearance
+        const float* car = reinterpret_cast<const float*>(mgr + 0x4F0);
+        const float half = std::max(p.length * 0.5f, 1.6f);
+        pos[0] = car[0] + fx * g_logCarAhead + a[0] * half;
+        pos[1] = car[1] - 0.45f + g_logCarHeight + a[1] * half;
+        pos[2] = car[2] + fz * g_logCarAhead + a[2] * half;
+    }
+    // A pole with its own model: it starts from how the pole stood (its own rotation, so an
+    // N-shaped pole's crossarms keep their direction), tipped by the same tilt toward the
+    // direction of travel, with its body centred halfway up it.
+    const bool own = p.pole && p.ownModel > 0 && g_logAxis == 1;
+    if (own) {
+        for (int r = 0; r < 3; ++r) {
+            const float* v = p.r0 + r * 3;   // rotate about b by t (Rodrigues)
+            float bxv[3] = {b[1] * v[2] - b[2] * v[1], b[2] * v[0] - b[0] * v[2], b[0] * v[1] - b[1] * v[0]};
+            float bd = b[0] * v[0] + b[1] * v[1] + b[2] * v[2];
+            for (int k = 0; k < 3; ++k) rot[r * 4 + k] = v[k] * ct + bxv[k] * st + b[k] * bd * (1 - ct);
+        }
+        const float half = p.height * p.scale;
+        pos[0] = p.x + fx * g_logAhead + rot[4] * half;
+        pos[1] = p.y + rot[5] * half;
+        pos[2] = p.z + fz * g_logAhead + rot[6] * half;
+    }
 
-    slot = reinterpret_cast<SpawnObjectFn>(g_base + 0x369690)(mgr, 0, id, slot, pos, rot, 0, nullptr);
+    // a pole drawn with its own model: its own pole-sized box for a body
+    // (objId is what the object is: the game looks it up through the hooked lookup; id stays the
+    // source piece, for the raw lookups below, which can't take our ids)
+    uint32_t objId = id;
+    if (ownWanted && g_poleOwnBody) {
+        if (uint8_t* bd = pole_body_def(table, id, p.height * p.scale)) {
+            g_poleBodyDef.store(bd, std::memory_order_release);
+            g_poleBodyModel.store(p.ownModel, std::memory_order_relaxed);
+            objId = 0xFFFF0000u | POLE_BODY_DEF;
+        }
+    }
+    // a log: a body the size of the log as it's drawn
+    if (!p.pole && g_logOwnBody && logModel.def != 0xFFFF) {
+        LogCandidate lk = pick_look(table, logModel);
+        if (lk.def < 0xFFFE) {
+            uint32_t lmid = ((uint32_t)lk.piece << 16) | lk.def;
+            int got = o_defModel(table, lmid);
+            float lk1 = 1, tk1 = 1;
+            look_factors(table, got, &lk1, &tk1);
+            if (uint32_t bid = log_body_def(table, lmid, p.length * lk1, p.thick * tk1, got)) objId = 0xFFFF0000u | bid;
+        }
+    }
+    slot = reinterpret_cast<SpawnObjectFn>(g_base + 0x369690)(mgr, 0, objId, slot, pos, rot, 0, nullptr);
     if (slot < 0) { dlogf("log %d: spawn refused", p.n); return; }
     uint8_t* obj = reinterpret_cast<uint8_t**>(vec_at(mgr + 0x290)->first)[slot];
     if (!obj) { dlogf("log %d: spawn made nothing", p.n); return; }
@@ -1664,7 +1965,18 @@ void spawn_log(const PendingLog& p) {
     // piece's definition so its centre-of-mass offset and culling radius are used.
     uint8_t* renderDef = nullptr;
     float lenK = 1.0f, thickK = 1.0f;
-    if (p.pole) {
+    if (own) {
+        // the pole's own model, bound with a copy of the body's definition that puts the model's
+        // base half a pole below the body and whose culling radius covers it
+        renderDef = pole_own_def(table, id, p.height * p.scale);
+        if (renderDef) {
+            g_poleRenderDef.store(renderDef);
+            model = p.ownModel;
+            static int said = 0;
+            if (said++ < 10) dlogf("pole %d: drawn with its own model %d (scale %.2f)", p.n, model, p.scale);
+        }
+    }
+    if (p.pole && !renderDef) {
         // a pole: drawn with PoleModel (the apple trunk's bark by default), with a copy of that
         // piece's definition whose culling radius covers the stretch
         LogCandidate look = pick_look(table, poleLook);
@@ -1678,12 +1990,16 @@ void spawn_log(const PendingLog& p) {
             if (k <= 20) dlogf("pole %d: %u:%u isn't loaded here; drawn with model %d (%u:%u) instead", p.n, poleLook.def, poleLook.piece,
                               model, look.def, look.piece);
         }
-    } else if (logModel.def != 0xFFFF && pick_look(table, logModel).def < 0xFFFE) {
+    } else if (!p.pole && logModel.def != 0xFFFF && pick_look(table, logModel).def < 0xFFFE) {
         LogCandidate look = pick_look(table, logModel);
         uint32_t mid = ((uint32_t)look.piece << 16) | look.def;
         int got = o_defModel(table, mid);
         look_factors(table, got, &lenK, &thickK);
         renderDef = render_def_for(table, mid, std::max(std::max(g_logLength, g_logLengthMax) * lenK, g_logThickness * thickK) + 1.0f, false);
+        // with a body of its own, it's drawn around that from the start (its centre of mass is the look's, scaled)
+        const uint32_t olo = objId & 0xFFFF;
+        if (renderDef && olo >= LOG_BODY_FIRST && olo < LOG_BODY_FIRST + LOG_BODY_COUNT)
+            if (uint8_t* bd = g_logBodies[olo - LOG_BODY_FIRST].def.load()) renderDef = bd;
         if (renderDef) {
             g_logRenderDef.store(renderDef);
             model = got;
@@ -1696,13 +2012,15 @@ void spawn_log(const PendingLog& p) {
     }
     alignas(16) float m[16] = {rot[0], rot[1], rot[2], 0, rot[4], rot[5], rot[6], 0, rot[8], rot[9], rot[10], 0, pos[0], pos[1], pos[2], 1};
     // experimental: scale the render model (the collision shape keeps its own size)
+    const bool ownDrawn = own && model == p.ownModel;
+    const float lenS = ownDrawn ? p.scale : p.length * lenK, thickS = ownDrawn ? p.scale : p.thick * thickK;
     for (int r = 0; r < 3; ++r) {
-        float k = r == g_logAxis ? p.length * lenK : p.thick * thickK;
+        float k = r == g_logAxis ? lenS : thickS;
         m[r * 4 + 0] *= k; m[r * 4 + 1] *= k; m[r * 4 + 2] *= k;
     }
     if (renderDef) *reinterpret_cast<uint32_t*>(obj + 0x124) = 0xFFFF0000u | (p.pole ? POLE_RENDER_DEF : LOG_RENDER_DEF);
     reinterpret_cast<BindModelFn>(g_base + 0x377340)(mgr, slot, obj, model, m);
-    *reinterpret_cast<uint32_t*>(obj + 0x124) = id;
+    *reinterpret_cast<uint32_t*>(obj + 0x124) = objId;
     reinterpret_cast<AddPhysicsFn>(g_base + 0x369E80)(mgr, obj);
     void* body = *reinterpret_cast<void**>(obj + 8);
     if (body) {
@@ -1711,11 +2029,11 @@ void spawn_log(const PendingLog& p) {
         reinterpret_cast<BodyWakeFn>(bvt[0x128 / 8])(body, 0, 0);
     }
     void** ovt = *reinterpret_cast<void***>(obj);
-    alignas(16) float lin[4] = {p.vx * p.speedK, p.vy * p.speedK + p.up, p.vz * p.speedK, 0};
+    alignas(16) float lin[4] = {p.vx * p.speedK, p.vy * p.speedK + (fromCar ? g_logCarUp : p.up), p.vz * p.speedK, 0};
     alignas(16) float ang[4] = {b[0] * p.spin, 0, b[2] * p.spin, 0}; // tumble forward
     reinterpret_cast<ObjVecFn>(ovt[0x88 / 8])(obj, lin);
     reinterpret_cast<ObjVecFn>(ovt[0x90 / 8])(obj, ang);
-    track_log(slot, obj, id, p.length * lenK, p.thick * thickK);
+    track_log(slot, obj, objId, lenS, thickS, ownDrawn ? p.height * p.scale : 0.0f);
     if (lenK != 1.0f || thickK != 1.0f) {
         static int said = 0;
         if (said++ < 20) dlogf("log %d: stand-in model %d scaled %.2f long x %.2f thick to match", p.n, model, lenK, thickK);
@@ -1805,6 +2123,98 @@ void d_breakPieces(uint8_t* mgr, uint8_t* obj) {
 }
 int g_logStretch = 1, g_logProbe = 0;
 
+// ---- loose fences drawn with their own model (platform 2.6.0 / API 7) ------------------------
+// A breakable with no pieces (a fence, most clutter) breaks off as a fresh copy of itself, and
+// BreakIntoPieces draws that copy with its definition's model (0x1412CD300, then the bind at
+// 0x14036AEC0). A fence made breakable by a name rule borrows another fence's definition, so the
+// copy came out as that fence: a green fence flew off as the rusty silver one. An instruction hook
+// at 0x14036AEAC, just after the model comes back in eax (r15 = the object hit, r14 = the
+// manager), puts in the model the procedural actually draws it with:
+//   object +0xC0 = its procedural's cell id, +0xC4 = its child; children are numbered through the
+//   procedural's groups in order, and a group's +4 is its batch (D_MODELS, 0x58 each);
+//   batch +0x50 -> render data R; R[+0] -> E; E[+0x10] -> the template instance it's copied from;
+//   that placed instance (track presentation +0xFB78, 0x70 each) has the model at +0x10.
+// For the game's own breakables that's the definition's model anyway; it only changes anything
+// when it differs, and only when that model is loaded, so a piece is never drawn invisible.
+int g_ownModels = 1;   // OwnModels
+std::atomic<int> g_ownSwaps{0};
+
+// Reads that can't fault: these follow pointers in game data that may be going away.
+bool sread(uint64_t p, void* out, size_t n) {
+    if (p < 0x10000) return false;
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(p), out, n, &got) && got == n;
+}
+template <class T> T srd(uint64_t p) { T v{}; sread(p, &v, sizeof v); return v; }
+std::string hexdump(const uint8_t* p, size_t n) {
+    std::string s;
+    char b[4];
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t v = 0;
+        if (!sread(reinterpret_cast<uint64_t>(p) + i, &v, 1)) return s + "(unreadable)";
+        std::snprintf(b, sizeof b, "%02x", v);
+        s += b;
+        if ((i & 7) == 7 && i + 1 < n) s += ' ';
+    }
+    return s;
+}
+
+// strict: 1 only when the track presentation is known and the model's resource is there
+int model_loaded(uint8_t* tp, int model) {
+    if (!tp || model < 0) return -1;
+    uint64_t mb = srd<uint64_t>(reinterpret_cast<uint64_t>(tp) + 0xF618), me = srd<uint64_t>(reinterpret_cast<uint64_t>(tp) + 0xF620);
+    if (!mb || me <= mb || (uint64_t)model >= (me - mb) / 8) return -1;
+    uint64_t md = srd<uint64_t>(mb + (uint64_t)model * 8);
+    return md && srd<uint64_t>(md + 8) ? 1 : 0;
+}
+// a placed (track) instance's model, or -1
+int placed_model(uint8_t* tp, int index) {
+    uint64_t pb = srd<uint64_t>(reinterpret_cast<uint64_t>(tp) + 0xFB78), pe = srd<uint64_t>(reinterpret_cast<uint64_t>(tp) + 0xFB80);
+    if (index < 0 || !pb || pe <= pb || (uint64_t)index >= (pe - pb) / 0x70) return -1;
+    return srd<int32_t>(pb + (uint64_t)index * 0x70 + 0x10);
+}
+// the model a collidable's procedural draws it with, or -1; name: its batch's model name
+int procedural_model(uint8_t* tp, uint8_t* mgr, uint8_t* obj, const char** name) {
+    const uint64_t o = reinterpret_cast<uint64_t>(obj), m = reinterpret_cast<uint64_t>(mgr);
+    const int proc = srd<int32_t>(o + 0xC0), child = srd<int32_t>(o + 0xC4);
+    uint64_t data = 0;
+    for (uint64_t c = srd<uint64_t>(m + 0x518), e = srd<uint64_t>(m + 0x520); c && c < e; c += 0x40)
+        if (srd<int32_t>(c + 0x28) == proc) {
+            uint64_t prov = srd<uint64_t>(c + 0x20);
+            if (srd<uintptr_t>(prov) == g_base + RVA_MODELS_VTABLE) data = srd<uint64_t>(prov + 0xF8);
+            break;
+        }
+    if (!data || child < 0) return -1;
+    int first = 0, batch = -1;
+    for (uint64_t g = srd<uint64_t>(data + D_GROUPS), ge = srd<uint64_t>(data + D_GROUPS + 8); g && g < ge; g += sizeof(Group)) {
+        int cnt = srd<int32_t>(g + 0x0C);
+        if (child < first + cnt) { batch = srd<int32_t>(g + 4); break; }
+        first += cnt;
+    }
+    uint64_t mb = srd<uint64_t>(data + D_MODELS), me = srd<uint64_t>(data + D_MODELS + 8);
+    if (batch < 0 || !mb || mb + (uint64_t)(batch + 1) * BATCH_SIZE > me) return -1;
+    const uint64_t b = mb + (uint64_t)batch * BATCH_SIZE;
+    if (name && readable(reinterpret_cast<void*>(b + B_NAME), 0x20)) *name = str_at(reinterpret_cast<uint8_t*>(b + B_NAME));
+    uint64_t R = srd<uint64_t>(b + 0x50), E = R ? srd<uint64_t>(R) : 0, I = E ? srd<uint64_t>(E + 0x10) : 0;
+    return I ? placed_model(tp, srd<int32_t>(I)) : -1;
+}
+void on_whole_model(FH2Context* c, void*) {
+    if (!g_ownModels) return;
+    uint8_t* obj = reinterpret_cast<uint8_t*>(c->r15);
+    uint8_t* mgr = reinterpret_cast<uint8_t*>(c->r14);
+    uint8_t* tp  = g_trackPres.load(std::memory_order_relaxed);
+    if (!tp || !obj || !mgr) return;
+    const int model = static_cast<int>(c->rax);
+    const char* name = "?";
+    const int own = procedural_model(tp, mgr, obj, &name);
+    if (own < 0 || own == model || model_loaded(tp, own) != 1) return;
+    c->rax = static_cast<uint32_t>(own);
+    const int k = ++g_ownSwaps;
+    if (k <= 10 || k % 200 == 0)
+        dlogf("own model: %s (definition %u) drawn with its model %d instead of %d; %d so far", name,
+              srd<uint32_t>(reinterpret_cast<uint64_t>(obj) + 0x124) & 0xFFFF, own, model, k);
+}
+
 uint64_t d_tpBind(uint8_t* tp, int slot, int model, const float* m, void* key) {
     uint64_t r = o_tpBind(tp, slot, model, m, key);
     __try {
@@ -1829,15 +2239,16 @@ struct LiveLog {
     int slot; uint8_t* obj; uint32_t id; int frames;
     float length;  // model stretch along its length for this log
     float thick;   // and across it
+    float down;    // a pole drawn with its own model: how far its base is below the body, along it
 };
 LiveLog g_live[64];
 int g_nLive = 0;
 std::mutex g_liveLock;
 
-void track_log(int slot, uint8_t* obj, uint32_t id, float length, float thick) {
+void track_log(int slot, uint8_t* obj, uint32_t id, float length, float thick, float down) {
     std::lock_guard<std::mutex> l(g_liveLock);
     if (g_nLive == 64) { std::memmove(g_live, g_live + 1, sizeof(LiveLog) * 63); --g_nLive; }
-    g_live[g_nLive++] = LiveLog{slot, obj, id, 0, length, thick};
+    g_live[g_nLive++] = LiveLog{slot, obj, id, 0, length, thick, down};
 }
 
 float len3(const float* v) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
@@ -1874,20 +2285,35 @@ NodeUpdateFn o_nodeUpdate = nullptr;
 constexpr int NSTRETCH = 64;
 std::atomic<uint8_t*> g_stretchNode[NSTRETCH];
 std::atomic<float> g_stretchLen[NSTRETCH], g_stretchThick[NSTRETCH];
+// A pole drawn with its own model starts at its base, but the game draws it each frame around
+// the body's centre (it uses the body piece's own centre of mass then, not the bind's), so its
+// base is moved down the pole by g_stretchDown. g_stretchLast is the translation it was moved
+// to, so a node that hasn't been rewritten since isn't moved twice.
+std::atomic<float> g_stretchDown[NSTRETCH];
+float g_stretchLast[NSTRETCH][3];
 std::atomic<int> g_stretchCount{0};
 
 uint64_t d_nodeUpdate(void* a, void* b, void* c, uint64_t d, uint8_t* node, uint64_t f, uint64_t g, uint64_t h) {
     if (g_stretchCount.load(std::memory_order_relaxed) && node) {
         for (int i = 0; i < NSTRETCH; ++i)
             if (g_stretchNode[i].load(std::memory_order_relaxed) == node) {
-                stretch_rows(reinterpret_cast<float*>(node + 0x20), 4, g_stretchLen[i].load(std::memory_order_relaxed),
-                             g_stretchThick[i].load(std::memory_order_relaxed));
+                float* mx = reinterpret_cast<float*>(node + 0x20);
+                stretch_rows(mx, 4, g_stretchLen[i].load(std::memory_order_relaxed), g_stretchThick[i].load(std::memory_order_relaxed));
+                const float down = g_stretchDown[i].load(std::memory_order_relaxed);
+                float* tr = mx + 12;
+                if (down > 0 && !(tr[0] == g_stretchLast[i][0] && tr[1] == g_stretchLast[i][1] && tr[2] == g_stretchLast[i][2])) {
+                    const float* ax = mx + g_logAxis * 4;
+                    const float l = len3(ax);
+                    if (l > 1e-3f)
+                        for (int k = 0; k < 3; ++k) tr[k] -= ax[k] / l * down;
+                    std::memcpy(g_stretchLast[i], tr, sizeof g_stretchLast[i]);
+                }
                 break;
             }
     }
     return o_nodeUpdate(a, b, c, d, node, f, g, h);
 }
-void stretch_node_add(uint8_t* node, float length, float thick) {
+void stretch_node_add(uint8_t* node, float length, float thick, float down) {
     if (!node || !o_nodeUpdate) return;
     for (int i = 0; i < NSTRETCH; ++i) if (g_stretchNode[i].load() == node) return;
     for (int i = 0; i < NSTRETCH; ++i) {
@@ -1895,6 +2321,8 @@ void stretch_node_add(uint8_t* node, float length, float thick) {
         if (g_stretchNode[i].load() != nullptr) continue;
         g_stretchLen[i].store(length);   // the slot is free: set its length before publishing the node
         g_stretchThick[i].store(thick);
+        g_stretchDown[i].store(down);
+        g_stretchLast[i][0] = g_stretchLast[i][1] = g_stretchLast[i][2] = 0;
         if (g_stretchNode[i].compare_exchange_strong(expect, node)) { g_stretchCount.fetch_add(1); return; }
     }
 }
@@ -1937,6 +2365,18 @@ void update_live_logs(uint8_t* mgr) {
         }
         ++L.frames;
         const float* pos = reinterpret_cast<const float*>(L.obj + 0xA0);
+        // Debug: where a new log or pole is over its first second, against the car, to see
+        // whether it's pushed out of something the moment it appears.
+        if (g_debug && (L.frames <= 4 || L.frames == 8 || L.frames == 15 || L.frames == 30 || L.frames == 60)) {
+            static int traced = 0;
+            if (L.frames == 1) ++traced;
+            if (traced <= 12) {
+                const float* car = reinterpret_cast<const float*>(mgr + 0x4F0);
+                dlogf("trace slot %d frame %d: body (%.2f, %.2f, %.2f); car (%.2f, %.2f, %.2f), %.2f m away level, %.2f m above it",
+                      L.slot, L.frames, pos[0], pos[1], pos[2], car[0], car[1], car[2],
+                      std::sqrt((pos[0] - car[0]) * (pos[0] - car[0]) + (pos[2] - car[2]) * (pos[2] - car[2])), pos[1] - car[1]);
+            }
+        }
         // follow the slot's render node as it moves, and only stretch it when it really is this log
         uint8_t* old = g_slotRender[L.slot].node.load();
         uint8_t* now = current_node(L.slot);
@@ -1944,9 +2384,9 @@ void update_live_logs(uint8_t* mgr) {
             stretch_node_remove(old);
             g_slotRender[L.slot].node.store(now);
         }
-        bool mine = now && readable(now + 0x20, 0x40) && near3(reinterpret_cast<const float*>(now + 0x50), pos, 6.0f);
+        bool mine = now && readable(now + 0x20, 0x40) && near3(reinterpret_cast<const float*>(now + 0x50), pos, 6.0f + L.down);
         if (L.frames >= 2) {
-            if (mine) stretch_node_add(now, L.length, L.thick);
+            if (mine) stretch_node_add(now, L.length, L.thick, L.down);
             else stretch_node_remove(now);
         }
         g_live[w++] = L;
@@ -2052,7 +2492,7 @@ char g_islandPoleModels[256] = "1748,1749,1501,1502,1503";
 bool g_islandMap = false;          // the map being scanned is Storm Island (see scan_poles)
 uint8_t* g_poleTp = nullptr;       // the track presentation the poles were found in
 float g_poleSpeedLoss = 0.15f, g_poleLength = 8.5f, g_poleThick = 3.5f, g_poleHeight = 4.3f, g_poleRadius = 0.9f, g_poleMaxScale = 1.3f;
-struct Pole { int index; float x, y, z; bool broken; };
+struct Pole { int index; float x, y, z; bool broken; int model; };   // model: its lowest-numbered (LOD0) one
 std::vector<Pole> g_poleList;
 std::atomic<int> g_polesBroken{0};
 uint8_t* g_poleScanBase = nullptr;
@@ -2069,10 +2509,13 @@ bool pole_model(int m) {
 }
 uint8_t* real_presentation(uint8_t* mgr) {
     uint8_t* pres = *reinterpret_cast<uint8_t**>(mgr + 0x10);
-    if (!readable(pres, 0x28)) return nullptr;
-    // CPresentationDeferred (ctor 0x14131E9B0) keeps the real presentation at +0x38, i.e. +0x28 from
-    // the sub-object mgr+0x10 points at; the deferred calls pass +0x20 to the queue. Try both.
-    for (int off : {0x20, 0x28}) {
+    if (!readable(pres, 0x40)) return nullptr;
+    // mgr+0x10 is the TRefCountedObjectThreadSafe<CPresentationDeferred> itself (vtable 0x142E6D948),
+    // whose constructor (0x14131E9B0) keeps the real presentation at +0x38. (+0x20 and +0x28, for a
+    // pointer to its +0x10 sub-object, never matched: the presentation was only ever found from
+    // the first loose piece's bind, so until then poles weren't found and nothing knew which
+    // models were loaded.)
+    for (int off : {0x38, 0x20, 0x28}) {
         uint8_t* real = *reinterpret_cast<uint8_t**>(pres + off);
         // CPresentation, or the TRefCountedObjectThreadSafe<CPresentation> the game actually makes
         if (readable(real, 0x40) && (*reinterpret_cast<uintptr_t*>(real) == g_base + 0x2EB7BA0 ||
@@ -2081,13 +2524,79 @@ uint8_t* real_presentation(uint8_t* mgr) {
     }
     return nullptr;
 }
+// Is q a track presentation with its world loaded? Told by what it holds, not its first vtable
+// (the live object's isn't CTrackPresentation's 0x142EB8590): its placed models (+0xFB78, 0x70
+// each), its model list (+0xF618) and its render nodes (+0xF630) are all real vectors.
+bool valid_tp(uint64_t q) {
+    if (q < 0x10000 || (q & 7)) return false;
+    uint64_t v[3];
+    auto vec_ok = [&](uint64_t at, uint64_t elem) {
+        if (!sread(q + at, v, sizeof v)) return false;
+        return v[0] > 0x10000 && v[1] > v[0] && v[2] >= v[1] && (v[1] - v[0]) % elem == 0 && v[1] - v[0] < (1ull << 32);
+    };
+    return vec_ok(0xFB78, 0x70) && vec_ok(0xF618, 8) && vec_ok(0xF630, 8);
+}
+// Where the CPresentation keeps its CTrackPresentation: +0x38 (seen in game), or looked for among
+// its fields, directly or one pointer deeper, and remembered once found.
+int g_tpOff = -1, g_tpOff2 = -1;
+uint8_t* tp_in(uint8_t* real) {
+    const uint64_t r = reinterpret_cast<uint64_t>(real);
+    auto is_tp = [&](uint64_t q) { return valid_tp(q); };
+    if (g_tpOff < 0 && is_tp(srd<uint64_t>(r + 0x38))) g_tpOff = 0x38;
+    if (g_tpOff >= 0) {
+        uint64_t q = srd<uint64_t>(r + g_tpOff);
+        if (g_tpOff2 >= 0) q = q ? srd<uint64_t>(q + g_tpOff2) : 0;
+        return is_tp(q) ? reinterpret_cast<uint8_t*>(q) : nullptr;
+    }
+    for (int o = 0; o < 0x800; o += 8)
+        if (is_tp(srd<uint64_t>(r + o))) {
+            g_tpOff = o;
+            logf("track presentation: CPresentation+0x%X", o);
+            return reinterpret_cast<uint8_t*>(srd<uint64_t>(r + o));
+        }
+    static int deep = 0;   // one pointer deeper: costlier, so only now and then
+    if (deep++ % 20) return nullptr;
+    for (int o = 0; o < 0x400; o += 8) {
+        uint64_t p = srd<uint64_t>(r + o);
+        if (p < 0x10000 || (p & 7)) continue;
+        for (int o2 = 0; o2 < 0x200; o2 += 8)
+            if (is_tp(srd<uint64_t>(p + o2))) {
+                g_tpOff = o; g_tpOff2 = o2;
+                logf("track presentation: CPresentation+0x%X -> +0x%X", o, o2);
+                return reinterpret_cast<uint8_t*>(srd<uint64_t>(p + o2));
+            }
+    }
+    return nullptr;
+}
+
 uint8_t* track_presentation(uint8_t* mgr) {
     uint8_t* real = real_presentation(mgr);
-    uint8_t* tp = real ? *reinterpret_cast<uint8_t**>(real + 0x38) : nullptr;
-    if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10) && *reinterpret_cast<uintptr_t*>(tp) == g_base + 0x2EB8590) return tp;
+    uint8_t* tp = real ? tp_in(real) : nullptr;
+    if (tp && valid_tp(reinterpret_cast<uint64_t>(tp))) {
+        // so "is this model loaded" can answer before anything has been bound (and after a map change)
+        if (g_trackPres.exchange(tp) != tp)
+            logf("track presentation %p found (vtable +%llX)", tp, (unsigned long long)(srd<uint64_t>(reinterpret_cast<uint64_t>(tp)) - g_base));
+        return tp;
+    }
     // fall back on the one seen binding a loose piece
     tp = g_trackPres.load();
-    if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10)) return tp;
+    if (tp && readable(tp, 8) && readable(tp + 0xFB78, 0x10)) {
+        static bool told = false;   // once: where it actually is, for the next build
+        if (real && g_tpOff < 0 && !std::exchange(told, true)) {
+            const uint64_t r = reinterpret_cast<uint64_t>(real), want = reinterpret_cast<uint64_t>(tp);
+            bool found = false;
+            for (int o = 0; o < 0x2000 && !found; o += 8)
+                if (srd<uint64_t>(r + o) == want) { logf("track presentation %p is at CPresentation+0x%X", tp, o); found = true; }
+            for (int o = 0; o < 0x400 && !found; o += 8) {
+                uint64_t q = srd<uint64_t>(r + o);
+                for (int o2 = 0; q > 0x10000 && !(q & 7) && o2 < 0x400 && !found; o2 += 8)
+                    if (srd<uint64_t>(q + o2) == want) { logf("track presentation %p is at CPresentation+0x%X -> +0x%X", tp, o, o2); found = true; }
+            }
+            if (!found) logf("track presentation %p isn't within two pointers of the CPresentation at %p (vtable +%llX)", tp, real,
+                             (unsigned long long)(srd<uint64_t>(r) - g_base));
+        }
+        return tp;
+    }
     static int diag = 0;
     if (diag++ % 600 == 0 && diag < 3000) {
         uint8_t* pres = *reinterpret_cast<uint8_t**>(mgr + 0x10);
@@ -2349,10 +2858,14 @@ void scan_poles(uint8_t* mgr) {
         ++scaleHist[hb < 0 ? 0 : hb > 7 ? 7 : hb];
         if (sc > g_poleMaxScale) { ++tooBig; continue; }   // the big ones stay as they are: solid
         bool dup = false;
-        for (const Pole& q : found)
-            if (std::fabs(q.x - p[0]) < 0.5f && std::fabs(q.z - p[2]) < 0.5f) { dup = true; break; }
+        for (Pole& q : found)
+            if (std::fabs(q.x - p[0]) < 0.5f && std::fabs(q.z - p[2]) < 0.5f) {
+                dup = true;
+                if (m < q.model) q.model = m;   // the LODs are the same instance; LOD0 has the lowest number
+                break;
+            }
         if (dup) continue;
-        Pole np{(int)i, p[0], p[1], p[2], false};
+        Pole np{(int)i, p[0], p[1], p[2], false, m};
         for (const Pole& old : g_poleList)   // keep what was already broken
             if (old.broken && std::fabs(old.x - p[0]) < 0.5f && std::fabs(old.z - p[2]) < 0.5f) np.broken = true;
         found.push_back(np);
@@ -2404,6 +2917,42 @@ void break_pole(uint8_t* mgr, Pole& pl, const float* vel) {
     p.n = 10000 + g_polesBroken.load();
     p.pole = true; p.length = g_poleLength; p.thick = g_poleThick; p.tilt = 6.0f; p.spin = 1.4f; p.speedK = 0.25f; p.up = 0.3f;
     p.height = g_poleHeight;
+    // the pole's own model and how it stands: its placed instance's rotation (nine halfs at +0x44,
+    // scale included) and its LOD0 model, drawn instead of a stretched trunk when it's loaded
+    p.ownModel = -1;
+    if (g_poleOwnModel && o_nodeUpdate && g_poleTp && pl.model > 0 && model_loaded(g_poleTp, pl.model) == 1) {
+        uint64_t pb = srd<uint64_t>(reinterpret_cast<uint64_t>(g_poleTp) + 0xFB78);
+        uint16_t h[9];
+        if (pb && sread(pb + (uint64_t)pl.index * 0x70 + 0x44, h, sizeof h)) {
+            float sc = 0;
+            for (int r = 0; r < 3; ++r) {
+                float v[3] = {half_to_float(h[r * 3]), half_to_float(h[r * 3 + 1]), half_to_float(h[r * 3 + 2])};
+                float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                if (l < 1e-3f) { sc = 0; break; }
+                for (int k = 0; k < 3; ++k) p.r0[r * 3 + k] = v[k] / l;
+                sc += l / 3.0f;
+            }
+            if (sc > 0.3f && p.r0[4] > 0.8f) {   // standing up (its up axis near vertical)
+                p.ownModel = pl.model;
+                p.scale    = sc;
+                // the size it's drawn at: its render node's rows (placed instances' nodes come
+                // first, (tp+0xF630)[index]), in case that isn't quite its placement's scale
+                uint64_t nb = srd<uint64_t>(reinterpret_cast<uint64_t>(g_poleTp) + 0xF630);
+                uint64_t ne = srd<uint64_t>(reinterpret_cast<uint64_t>(g_poleTp) + 0xF638);
+                uint64_t node = nb && (uint64_t)pl.index < (ne - nb) / 8 ? srd<uint64_t>(nb + (uint64_t)pl.index * 8) : 0;
+                float rows[12];
+                if (node && sread(node + 0x20, rows, sizeof rows)) {
+                    float ns = 0;
+                    for (int r = 0; r < 3; ++r) ns += len3(rows + r * 4) / 3.0f;
+                    static int said = 0;
+                    if (said++ < 10)
+                        dlogf("pole %d: placement scale %.3f, its render node's %.3f (rows %.3f %.3f %.3f)", (int)(10000 + g_polesBroken.load()), sc,
+                              ns, len3(rows), len3(rows + 4), len3(rows + 8));
+                    if (ns > 0.5f && ns < 2.0f) p.scale = ns;
+                }
+            }
+        }
+    }
     push_pending(p);
     // speed loss on the player's car (known from its last smash), and some wood flying
     if (uint8_t* dyn = g_lastCarDyn.load()) {
@@ -2932,6 +3481,11 @@ void load_settings() {
     g_logSpeed   = getf(L"LogSpeed", 0.7f);
     g_logUp      = getf(L"LogUp", 2.0f);
     g_logSpin    = getf(L"LogSpin", 3.0f);
+    g_logFromCar   = GetPrivateProfileIntW(L"WreckingBall", L"LogFromCar", 1, ini.c_str());
+    g_logCarAhead  = getf(L"LogCarAhead", 3.0f);
+    g_logCarHeight = getf(L"LogCarHeight", 0.1f);
+    g_logCarUp     = getf(L"LogCarUp", 0.0f);
+    g_logCarTilt   = getf(L"LogCarTilt", 8.0f);
     g_logStretch   = GetPrivateProfileIntW(L"WreckingBall", L"LogStretch", 1, ini.c_str());
     g_logLength    = getf(L"LogLength", 3.0f);
     g_logThickness = getf(L"LogThickness", 4.5f);
@@ -2951,6 +3505,10 @@ void load_settings() {
     g_markEnabled  = g_debug;
     g_checkUpdates = GetPrivateProfileIntW(L"WreckingBall", L"CheckUpdates", 1, ini.c_str());
     g_loadedLooks = GetPrivateProfileIntW(L"WreckingBall", L"LoadedModelFallback", 1, ini.c_str());
+    g_ownModels   = GetPrivateProfileIntW(L"WreckingBall", L"OwnModels", 1, ini.c_str());
+    g_poleOwnModel = GetPrivateProfileIntW(L"WreckingBall", L"PoleOwnModel", 1, ini.c_str());
+    g_poleOwnBody  = GetPrivateProfileIntW(L"WreckingBall", L"PoleOwnBody", 1, ini.c_str());
+    g_logOwnBody   = GetPrivateProfileIntW(L"WreckingBall", L"LogOwnBody", 1, ini.c_str());
     {
         GetPrivateProfileStringW(L"WreckingBall", L"SolidModels", L"8616", big, 128, ini.c_str());
         g_solidOn = GetPrivateProfileIntW(L"WreckingBall", L"SolidPylons", 1, ini.c_str());
@@ -3174,6 +3732,18 @@ DWORD WINAPI setup_thread(LPVOID) {
         ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
                                    reinterpret_cast<void*>(d_breakPieces), reinterpret_cast<void**>(&o_breakPieces)) != nullptr;
     else if (g_loadedLooks) logf("tree piece fallback: game code doesn't match, off");
+    // Own models for loose fences: an instruction hook, so platform 2.6.0 (API 7) or later. Not
+    // part of `ok`: without it fences just keep the look of the definition they break as.
+    static const uint8_t wm[] = {0x48, 0x8D, 0x4D, 0xC0, 0x48, 0x89, 0x4C, 0x24, 0x20};   // lea rcx,[rbp-40h]; mov [rsp+20h],rcx
+    if (g_ownModels && g_api->api_version >= 7 && code_matches(0x36AEAC, wm, sizeof wm)) {
+        if (!g_api->hook_instruction(g_mod, "BreakIntoPieces: the loose copy's model", reinterpret_cast<void*>(g_base + 0x36AEAC),
+                                     &on_whole_model, nullptr))
+            logf("own models: the platform didn't allow the hook (see platform.log); fences keep their stand-in's look");
+    } else if (g_ownModels) {
+        logf(g_api->api_version < 7 ? "own models: needs FH2 Mod Platform 2.6.0 or later; fences keep their stand-in's look"
+                                    : "own models: game code doesn't match, off");
+        g_ownModels = 0;
+    }
     static const uint8_t mu[] = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55}; // CWorldCollObjMan update
     static const uint8_t so[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x88, 0x50, 0x10}; // SpawnObject
     // Logs, poles and debris clean-up all run from here, and each can be switched on and off
