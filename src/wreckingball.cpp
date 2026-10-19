@@ -2073,6 +2073,18 @@ void update_live_logs(uint8_t* mgr) {
         }
         ++L.frames;
         const float* pos = reinterpret_cast<const float*>(L.obj + 0xA0);
+        // Debug: where a new log or pole is over its first second, against the car, to see
+        // whether it's pushed out of something the moment it appears.
+        if (g_debug && (L.frames <= 4 || L.frames == 8 || L.frames == 15 || L.frames == 30 || L.frames == 60)) {
+            static int traced = 0;
+            if (L.frames == 1) ++traced;
+            if (traced <= 12) {
+                const float* car = reinterpret_cast<const float*>(mgr + 0x4F0);
+                dlogf("trace slot %d frame %d: body (%.2f, %.2f, %.2f); car (%.2f, %.2f, %.2f), %.2f m away level, %.2f m above it",
+                      L.slot, L.frames, pos[0], pos[1], pos[2], car[0], car[1], car[2],
+                      std::sqrt((pos[0] - car[0]) * (pos[0] - car[0]) + (pos[2] - car[2]) * (pos[2] - car[2])), pos[1] - car[1]);
+            }
+        }
         // follow the slot's render node as it moves, and only stretch it when it really is this log
         uint8_t* old = g_slotRender[L.slot].node.load();
         uint8_t* now = current_node(L.slot);
