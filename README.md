@@ -8,15 +8,15 @@ It works on the mainland and on Storm Island. It's a single DLL. The game's file
 
 **Trees and bushes.** Every tree and bush in the open world breaks when you hit it, using the game's own smashable tree physics, so it sounds and looks like the handful of breakable trees the game already had. Bigger trees slow you down more than small ones, and the biggest count as log piles, so they give you Lumberjack skill points. They also throw wood splinters and dust on top of the usual burst of leaves. Bushes, hedges and crops flatten like the game's own breakable bushes instead: a small puff of leaves, with no log and only a light slowdown.
 
-**Logs.** Every broken tree throws a log, sized to the tree it came from, that tumbles away from the car and rolls to a stop.
+**Logs.** Every broken tree throws a log, sized to the tree it came from. It pops up just ahead of your car, leaning away from you, for the nose to knock over, and its collision is the size of the log you see, so it rolls and settles where it looks like it should.
 
-**Fences, railings and roadside clutter.** Wooden fences, wire fences, wicker and tarp fencing, metal railings, guardrails and bollards break apart when you hit them. So does roadside clutter that has a breakable version somewhere else in the game, like signs, bins and lamp posts. A few things always stay solid:
+**Fences, railings and roadside clutter.** Wooden fences, wire fences, wicker and tarp fencing, metal railings, guardrails and bollards break apart when you hit them, and the pieces keep the look of the fence they came from, paint and all. So does roadside clutter that has a breakable version somewhere else in the game, like signs, bins and lamp posts. A few things always stay solid:
 - the fences and barriers of the Festival and its events;
 - barriers that only appear for a race, including those in front of the crowds;
 - walls, bridges, concrete barriers and gates;
 - any barrier with nothing but a drop behind it, so you can't fly off the edge of a mountain road.
 
-**Telephone poles.** The wooden telephone poles along the roads fall over when you hit them, and a pole tumbles away in their place. The big square concrete pylons work the other way round: the game forgot to give them any collision at all, so you could drive straight through them. WreckingBall makes them solid.
+**Telephone poles.** The wooden telephone poles along the roads fall over when you hit them: the pole itself tips over from where it stood and rolls on its full length, with collision the size of the pole. The big square concrete pylons work the other way round: the game forgot to give them any collision at all, so you could drive straight through them. WreckingBall makes them solid.
 
 **Debris clean-up.** Broken pieces fade out after 45 seconds, or once you're 120 m away, so the world doesn't fill up with wreckage.
 
@@ -34,7 +34,7 @@ When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO
 
 ### Using it with other FH2 mods
 
-`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, which is the one in its zip. The MODS page in the game comes with platform 2.3.0, its sliders with 2.4.0 and the pause menu's MODS tab with 2.5.0; on an older platform everything else works and those settings are in the ini only.
+`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, and the one in its zip is 2.6.0. The MODS page in the game comes with platform 2.3.0, its sliders with 2.4.0, the pause menu's MODS tab with 2.5.0, and loose fences keeping their own look with 2.6.0; on an older platform everything else works, those settings are in the ini only, and fence pieces look like the breakable fence they borrow.
 
 ## Settings
 
@@ -53,6 +53,9 @@ The main switches are in the game, under Pause > Settings > MODS (see above). Ev
 | `Logs` | `1` | `0` turns the logs off. |
 | `LogMinSize` | `0.4` | Trees smaller than this don't throw a log. Bushes never do. |
 | `LogLength`, `LogThickness` | `3.0`, `4.5` | Log size, as multiples of the trunk model's own size. Bigger trees throw longer logs, between `LogLengthMin` and `LogLengthMax`. |
+| `LogFromCar` | `1` | A log appears standing just ahead of the car, for the nose to knock over. `0` throws it from the tree instead, as before 1.3.0. |
+| `LogCarAhead`, `LogCarHeight`, `LogCarTilt` | `3.0`, `0.1`, `8` | Where that log appears: metres ahead of the car's centre, its base's clearance over the ground, and how far it leans forward (degrees). |
+| `LogOwnBody` | `1` | A log's collision is a box the size of the log as it's drawn. `0` gives every log the same pole-shaped body, as before 1.3.0. |
 | `LogModelScale` | `948:0.85/0.4` | Size correction for the olive trunk that stands in for the apple trunk away from the orchards (see below). |
 | `Barriers` | `1` | `0` keeps fences and railings solid. |
 | `Clutter` | `1` | `0` keeps roadside clutter as the game had it. |
@@ -60,8 +63,11 @@ The main switches are in the game, under Pause > Settings > MODS (see above). Ev
 | `BarrierSkipEvents` | `1` | Barriers that only appear for an event stay solid. |
 | `BarrierNeedGround` | `1` | A barrier only breaks where there's ground on both sides of it. `0` lets everything break, drops and all. |
 | `BarrierSpeedLoss` | `0.04` | Share of your speed a fence or railing takes. |
+| `OwnModels` | `1` | A loose fence or piece of clutter is drawn with its own model, so it keeps its paint. `0` draws it as the breakable it borrows, as before 1.3.0. Needs platform 2.6.0. |
 | `Poles` | `1` | `0` keeps telephone poles solid. |
 | `PoleSpeedLoss` | `0.15` | Share of your speed a telephone pole takes. |
+| `PoleOwnModel` | `1` | The falling pole is the pole's own model, tipping over from where it stood. `0` drops a stretched tree trunk instead, as before 1.3.0. |
+| `PoleOwnBody` | `1` | That pole's collision is a box the length of the pole. `0` uses a street light's pole piece instead. |
 | `SolidPylons` | `1` | `0` leaves the concrete pylons without collision, as the game has them. |
 | `SolidModels` | `8616` | Models made solid (8616 = the concrete pylons). |
 | `DebrisCleanup` | `1` | `0` leaves broken pieces until the game clears them. |
@@ -77,7 +83,6 @@ Delete `fh2-mods\WreckingBall.dll` and `fh2-mods\WreckingBall.ini`. The next tim
 
 ## Known limitations
 
-- **Fence debris colour:** pieces of painted fences come out in the game's plain metal colour.
 - **Telephone wires:** when a pole falls, its wires stay hanging. The game draws a whole run of wire as one object, so a single span can't be taken down.
 - **Log and branch models:** the game only loads a model's 3D data near where it uses it, and its breakable apple tree only appears near the orchards. Elsewhere, broken trees use the olive tree's pieces and logs use the olive trunk, sized to match. In the rare spot where neither is loaded, the pieces can't be drawn.
 - **Game version:** WreckingBall is written for the 24 November 2015 build of Forza Horizon 2 that Azimuth runs. On anything else it checks the game code first and turns itself off instead of patching the wrong place.
@@ -92,7 +97,9 @@ FH2 places its trees, fences and clutter as "procedurals", big batches of instan
 
 The game's own smashable code then handles everything from there: the hit, the pieces, the sounds and the skills. Trees and fences also keep a solid collision mesh in the track's physics data, so the mod filters those triangles out of the game's collision queries around every breakable trunk and fence. The ground under and around them is always left alone. Before letting a fence go, it looks for ground on both sides of it; if it can't find any, the fence keeps its collision.
 
-Logs are loose pieces spawned through the game's own object manager, drawn with the apple tree's trunk and stretched to the right size by adjusting their render matrix every frame. Telephone poles aren't breakable objects in the game at all, just placed models. So the mod hides a pole's model when your car reaches it, removes its collision, and drops a falling pole in its place. The concrete pylons get a box of collision triangles added to the game's collision queries instead.
+A fence that breaks as another fence's definition would come off looking like that fence. So, with platform 2.6.0, an instruction hook in the game's break code swaps in the model the procedural itself draws, found through the procedural's own data, whenever that model is loaded.
+
+Logs are loose pieces spawned through the game's own object manager, drawn with the apple tree's trunk and stretched to the right size by adjusting their render matrix every frame. Telephone poles aren't breakable objects in the game at all, just placed models. So the mod hides a pole's model when your car reaches it, removes its collision, and drops the pole's own model, standing where it stood, as a falling piece in its place. A breakable's collision is a short list of simple shapes in its definition, which the game reads every time it makes a body, so logs and poles get definitions of their own: a box the size of the log or pole as it's drawn. The concrete pylons get a box of collision triangles added to the game's collision queries instead.
 
 Broken pieces normally only disappear once you're about 150 m from where they broke. WreckingBall starts the game's own two-second fade earlier, by age or by distance. Before a tree breaks, it also checks that the pieces' models are actually loaded nearby, and switches to a tree that is if they aren't.
 
