@@ -13,22 +13,28 @@ Requirements
 ~~~~~~~~~~~~
 
   - Forza Horizon 2 running through Azimuth.
+  - FH2ML, the Forza Horizon 2 mod loader
+    (https://github.com/Refilewski/FH2ML).
+  - Forza Horizon 2 Extra Options.
 
 
 Install
 ~~~~~~~
 
-1. Close Azimuth.
-2. Extract this zip into your Azimuth folder (the one with azimuth.exe).
-   You should end up with:
-       d3dcompiler_47.dll            next to azimuth.exe
-       fh2-mods\WreckingBall.dll
-3. Start the game and drive into a tree.
+With the FH2ML Manager: close Azimuth, open the Manager, choose Install
+mod and pick this zip.
 
-d3dcompiler_47.dll is the FH2 Mod Platform, the shared base for FH2 mods
-(https://github.com/Trinculo54/FH2-Mod-Platform). It loads every mod in
-fh2-mods, and every mod built on it ships the same file, so it's fine to
-overwrite.
+Or by hand: close Azimuth and extract this zip into your Azimuth folder
+(the one with azimuth.exe). You should end up with:
+    mods\wreckingball\mod.json
+    mods\wreckingball\WreckingBall.dll
+
+Then start the game and drive into a tree.
+
+Upgrading from WreckingBall 1.3 or older: those came with a mod loader of
+their own. Let the FH2ML Manager remove it when it offers to, so the old
+WreckingBall isn't loaded as well. Your WreckingBall.ini is copied over
+the first time you start the game with this version.
 
 
 In the game
@@ -44,12 +50,13 @@ are sliders for how much trees, bushes, fences and telephone poles slow you
 down; they apply as you move them. Changes are saved to WreckingBall.ini.
 
 
-Settings (fh2-mods\WreckingBall.ini)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Settings (FH2ML\data\wreckingball\WreckingBall.ini)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Created on first launch, with a comment next to each setting. Changes
-made here apply the next time you start the game; delete the file to get
-the defaults back.
+Created on first launch, with a comment next to each setting, in the
+Azimuth folder's FH2ML\data\wreckingball. It's kept when you update or
+remove the mod. Changes made here apply the next time you start the game;
+delete the file to get the defaults back.
 
   InjectTrees=1        0 = trees and bushes stay solid
   SpeedLoss=0.12       share of your speed a normal tree takes
@@ -61,28 +68,31 @@ the defaults back.
   DebrisCleanup=1      0 = broken pieces stay until the game clears them
   DebrisLifetime=45    seconds before broken pieces fade out (0 = off)
   DebrisDistance=120   metres away before they fade out (0 = off)
-  CheckUpdates=1       0 = don't check GitHub for a newer version
   Debug=0              1 = detailed log, F8 snapshot (for bug reports)
 
 When a newer version is out, the title screen says so after
-"PRESS (A) TO START".
+"PRESS (A) TO START". FH2ML checks GitHub for it; to turn that off, add
+"updateChecks": false to wreckingball's entry under "mods" in
+FH2ML\config\FH2ML.json.
 
 
 Troubleshooting
 ~~~~~~~~~~~~~~~
 
-fh2-mods\WreckingBall.log is written fresh each launch. A working launch
-ends with "on: trees yes, logs yes, ...". If nothing breaks and there's no
-log, check fh2-mods\platform.log. To report an invisible wall or something
-that should break, set Debug=1, drive up to it, press F8 and attach
-WreckingBall.log.
+FH2ML\data\wreckingball\WreckingBall.log is written fresh each launch. A
+working launch ends with "on: trees yes, logs yes, ...". If nothing breaks
+and there's no log, check FH2ML\logs\FH2ML.log: it should say
+"wreckingball: lifecycle v4 initialized". To report an invisible wall or
+something that should break, set Debug=1, drive up to it, press F8 and
+attach WreckingBall.log.
 
 
 Uninstall
 ~~~~~~~~~
 
-Delete fh2-mods\WreckingBall.dll and fh2-mods\WreckingBall.ini. Delete
-d3dcompiler_47.dll and fh2-mods too if no other FH2 mods use them.
+Remove WreckingBall in the FH2ML Manager, or delete mods\wreckingball.
+Your settings stay in FH2ML\data\wreckingball; delete that folder too if
+you don't want them any more. Nothing else was changed.
 
 
 License

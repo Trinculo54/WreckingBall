@@ -2,7 +2,7 @@
 
 A mod for **Forza Horizon 2** on PC that lets you drive through the scenery the way later Horizon games do. In the original game most trees are solid walls, every fence and railing outside a festival is an invisible barrier, and a wooden telephone pole will stop a hypercar dead. WreckingBall makes all of those break: trees snap and throw a log, fences and railings burst apart, roadside clutter goes flying and telephone poles fall over. Festival fences and the barriers in front of crowds stay exactly as solid as before.
 
-It works on the mainland and on Storm Island. It's a single DLL. The game's files are never touched, so removing it puts everything back the way it was.
+It works on the mainland and on Storm Island. It's a single DLL, loaded by [FH2ML](https://github.com/Refilewski/FH2ML). The game's files are never touched, so removing it puts everything back the way it was.
 
 ## Features
 
@@ -24,23 +24,28 @@ It works on the mainland and on Storm Island. It's a single DLL. The game's file
 
 ## Install
 
-You'll need Forza Horizon 2 running on PC through Azimuth. Download the latest zip from the [Releases](../../releases) page, close Azimuth, and extract the zip into your Azimuth folder, the one with `azimuth.exe` in it. You should end up with `d3dcompiler_47.dll` next to `azimuth.exe` and `WreckingBall.dll` inside a `fh2-mods` folder. Start the game and drive into a tree.
+You'll need Forza Horizon 2 running on PC through Azimuth, with [FH2ML](https://github.com/Refilewski/FH2ML), the Forza Horizon 2 mod loader, and Forza Horizon 2 Extra Options installed. Download the latest zip from the [Releases](../../releases) page and close Azimuth. Then either:
 
-WreckingBall doesn't need Forza Horizon 2 Extra Options, but it works fine alongside it.
+- open the FH2ML Manager, choose **Install mod** and pick the zip; or
+- extract the zip into your Azimuth folder, the one with `azimuth.exe` in it. You should end up with `mod.json` and `WreckingBall.dll` in `mods\wreckingball`.
+
+Start the game and drive into a tree.
+
+**Upgrading from 1.3 or older.** Those versions came with a mod loader of their own. When the FH2ML Manager offers to remove it, let it, so the old WreckingBall isn't loaded as well as the new one. Your `WreckingBall.ini` is copied over to its new place (see [Settings](#settings)) the first time you start the game with this version; nothing is copied after that.
 
 ### Updates
 
-When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO START". The mod asks GitHub at most every six hours. The version you have is in the first line of `fh2-mods\WreckingBall.log` and in the DLL's file properties.
+When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO START", and the MODS tab marks it. FH2ML asks GitHub at most every six hours. To turn that off, add `"updateChecks": false` to `wreckingball`'s entry under `"mods"` in `FH2ML\config\FH2ML.json` (or set it at the top level for every mod). The version you have is in the first line of `FH2ML\data\wreckingball\WreckingBall.log`, in `mods\wreckingball\mod.json` and in the DLL's file properties.
 
 ### Using it with other FH2 mods
 
-`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, and the one in its zip is 2.6.1. The MODS page in the game comes with platform 2.3.0, its sliders with 2.4.0, the pause menu's MODS tab with 2.5.0, and loose fences keeping their own look with 2.6.0; on an older platform everything else works, those settings are in the ini only, and fence pieces look like the breakable fence they borrow.
+[FH2ML](https://github.com/Refilewski/FH2ML) loads every mod in the `mods` folder and gives them shared services: hooks that let several mods change the same game code without stepping on each other, the MODS page and tab in the game, update checks and crash reports. Install, enable, disable and order mods with the FH2ML Manager.
 
-**Playing with a racing wheel.** [fh2wheel](https://github.com/iamAzoDx/fh2wheel) ships its own `D3DCOMPILER_47.dll`, and only one can sit next to `azimuth.exe`. Install fh2wheel first, then extract WreckingBall's zip and let its `d3dcompiler_47.dll` overwrite fh2wheel's. Keep `fh2wheel.dll` and `fh2wheel-config.exe` next to `azimuth.exe`: the platform (2.6.1 or later) loads fh2wheel itself, and it's listed on the MODS tab.
+**Playing with a racing wheel.** WreckingBall no longer puts anything next to `azimuth.exe`, so it doesn't get in the way of [fh2wheel](https://github.com/iamAzoDx/fh2wheel). Keep `fh2wheel.dll` and `fh2wheel-config.exe` next to `azimuth.exe`: FH2ML loads `fh2wheel.dll` itself when fh2wheel's own `D3DCOMPILER_47.dll` isn't there (as after the old mod loader is removed), and leaves it to that file when it is. Either way fh2wheel shows up on the MODS tab.
 
 ## Settings
 
-The main switches are in the game, under Pause > Settings > MODS (see above). Everything, those included, is in `fh2-mods\WreckingBall.ini`, created the first time you launch with comments next to everything. Changes made in the file apply the next time you start the game, and deleting it gets you the defaults back.
+The main switches are in the game, under Pause > Settings > MODS (see above). Everything, those included, is in `WreckingBall.ini`, in the Azimuth folder's `FH2ML\data\wreckingball`, created the first time you launch with comments next to everything. It's kept when you update or remove the mod. Changes made in the file apply the next time you start the game, and deleting it gets you the defaults back.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -65,7 +70,7 @@ The main switches are in the game, under Pause > Settings > MODS (see above). Ev
 | `BarrierSkipEvents` | `1` | Barriers that only appear for an event stay solid. |
 | `BarrierNeedGround` | `1` | A barrier only breaks where there's ground on both sides of it. `0` lets everything break, drops and all. |
 | `BarrierSpeedLoss` | `0.04` | Share of your speed a fence or railing takes. |
-| `OwnModels` | `1` | A loose fence or piece of clutter is drawn with its own model, so it keeps its paint. `0` draws it as the breakable it borrows, as before 1.3.0. Needs platform 2.6.0. |
+| `OwnModels` | `1` | A loose fence or piece of clutter is drawn with its own model, so it keeps its paint. `0` draws it as the breakable it borrows, as before 1.3.0. |
 | `Poles` | `1` | `0` keeps telephone poles solid. |
 | `PoleSpeedLoss` | `0.15` | Share of your speed a telephone pole takes. |
 | `PoleOwnModel` | `1` | The falling pole is the pole's own model, tipping over from where it stood. `0` drops a stretched tree trunk instead, as before 1.3.0. |
@@ -74,14 +79,13 @@ The main switches are in the game, under Pause > Settings > MODS (see above). Ev
 | `SolidModels` | `8616` | Models made solid (8616 = the concrete pylons). |
 | `DebrisCleanup` | `1` | `0` leaves broken pieces until the game clears them. |
 | `DebrisLifetime`, `DebrisDistance` | `45`, `120` | Broken pieces fade out after this many seconds, or once you're this many metres away. `0` turns either limit off. |
-| `CheckUpdates` | `1` | `0` stops the update check. |
-| `Debug` | `0` | `1` writes a detailed log. F8 then adds a snapshot of the collision around the car, and the game's breakable definitions go to `WreckingBall-defs.txt`. Turn it on when reporting a problem. |
+| `Debug` | `0` | `1` writes a detailed log. F8 then adds a snapshot of the collision around the car, and the game's breakable definitions go to `WreckingBall-defs.txt`, next to the ini. Turn it on when reporting a problem. |
 
 The Wreckage, Lumberjack and Sideswipe skills award at most once every 1, 2.5 and 5 seconds respectively (`WreckageRetrigger`, `LumberjackRetrigger`, `SideswipeRetrigger`), so plowing through a forest doesn't flood the skill chain. These change the skills for everything you smash, not just trees, and `-1` leaves the game's own values. More settings, mostly the numbers behind the tree sizes, log throwing and pole physics, are read from the ini too. They're listed with their defaults at the top of `load_settings()` in [`src/wreckingball.cpp`](src/wreckingball.cpp).
 
 ## Uninstall
 
-Delete `fh2-mods\WreckingBall.dll` and `fh2-mods\WreckingBall.ini`. The next time the game starts, the platform takes the MODS tile back out (unless another mod has switches there). If you don't use any other FH2 mods, start the game once more after that, then delete `d3dcompiler_47.dll` and the `fh2-mods` folder too. Nothing else was changed.
+Remove WreckingBall in the FH2ML Manager, or delete the `mods\wreckingball` folder. Your settings stay in `FH2ML\data\wreckingball`; delete that folder too if you don't want them any more. Nothing else was changed.
 
 ## Known limitations
 
@@ -99,7 +103,7 @@ FH2 places its trees, fences and clutter as "procedurals", big batches of instan
 
 The game's own smashable code then handles everything from there: the hit, the pieces, the sounds and the skills. Trees and fences also keep a solid collision mesh in the track's physics data, so the mod filters those triangles out of the game's collision queries around every breakable trunk and fence. The ground under and around them is always left alone. Before letting a fence go, it looks for ground on both sides of it; if it can't find any, the fence keeps its collision.
 
-A fence that breaks as another fence's definition would come off looking like that fence. So, with platform 2.6.0, an instruction hook in the game's break code swaps in the model the procedural itself draws, found through the procedural's own data, whenever that model is loaded.
+A fence that breaks as another fence's definition would come off looking like that fence. So an instruction hook in the game's break code swaps in the model the procedural itself draws, found through the procedural's own data, whenever that model is loaded.
 
 Logs are loose pieces spawned through the game's own object manager, drawn with the apple tree's trunk and stretched to the right size by adjusting their render matrix every frame. Telephone poles aren't breakable objects in the game at all, just placed models. So the mod hides a pole's model when your car reaches it, removes its collision, and drops the pole's own model, standing where it stood, as a falling piece in its place. A breakable's collision is a short list of simple shapes in its definition, which the game reads every time it makes a body, so logs and poles get definitions of their own: a box the size of the log or pole as it's drawn. The concrete pylons get a box of collision triangles added to the game's collision queries instead.
 
@@ -107,28 +111,28 @@ Broken pieces normally only disappear once you're about 150 m from where they br
 
 ## Build from source
 
-The mod is built with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releases) and CMake, on top of the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), which is a git submodule in `platform/`. Clone with `--recursive`, or run `git submodule update --init`; the build script does it for you if it's missing. On Linux:
+The mod is built with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releases) and CMake, as an FH2ML v4 mod. The one header it needs from FH2ML, `FH2ML_v4.h`, is in `third_party/fh2ml` with its MIT license. On Linux:
 
 ```bash
 ./scripts/build.sh
 ```
 
-`dist/` then holds `d3dcompiler_47.dll`, `fh2-mods/WreckingBall.dll` and a `README.txt`, ready to zip up. GitHub Actions does the same on every push and uploads the result as a build artifact. Pushing a tag like `v1.0.0` also creates a draft release with the zip attached, ready to be published. The version lives in `project(... VERSION x.y.z)` in `CMakeLists.txt`. Bump it before tagging: the tag build refuses to run if the two don't match, and it's what the mod compares against the latest GitHub release.
+`dist/` then holds `mods/wreckingball/` with `mod.json`, `WreckingBall.dll`, `README.txt` and `LICENSE.txt`, ready to zip up: the zip extracts straight into the Azimuth folder, and the FH2ML Manager installs it as it is. GitHub Actions does the same on every push and uploads the result as a build artifact. Pushing a tag like `v1.0.0` also creates a draft release with the zip attached, ready to be published. The version lives in `project(... VERSION x.y.z)` in `CMakeLists.txt`; the mod reports it to FH2ML, and `mod.json` is generated from it (`cmake/mod.json.in`), so the two always match. Bump it before tagging: the tag build refuses to run if the two don't match, and it's what FH2ML compares against the latest GitHub release.
 
 ## Troubleshooting
 
-`fh2-mods\WreckingBall.log` starts fresh every launch. A working launch ends with a line like `on: trees yes, logs yes, fences and railings yes, ...`, and every change made on the MODS page is logged. The FH2 Mod Platform writes `fh2-mods\platform.log`, which shows whether the mod was loaded at all and lists every hook it put in. If the game crashes, the platform saves a report in `fh2-mods\crashes` that says which mod, if any, was involved.
+`FH2ML\data\wreckingball\WreckingBall.log` starts fresh every launch. A working launch ends with a line like `on: trees yes, logs yes, fences and railings yes, ...`, and every change made on the MODS page is logged. FH2ML writes `FH2ML\logs\FH2ML.log`, which shows whether the mod was loaded at all (`wreckingball: lifecycle v4 initialized`), how many hooks it put in, and why if one was refused. If the game crashes, FH2ML saves a report in `FH2ML\logs\crashes` that says which mod, if any, was involved.
 
 | Symptom | Fix |
 |---|---|
-| Nothing breaks and there's no `WreckingBall.log` | Make sure `d3dcompiler_47.dll` is next to `azimuth.exe` and `WreckingBall.dll` is inside `fh2-mods`, then check `fh2-mods\platform.log`. |
+| Nothing breaks and there's no `WreckingBall.log` | Make sure FH2ML is installed, `mods\wreckingball` holds `mod.json` and `WreckingBall.dll`, and WreckingBall is enabled in the FH2ML Manager, then check `FH2ML\logs\FH2ML.log`. |
 | The log says the game code doesn't match | You're not on the game build Azimuth uses. The mod turns itself off rather than patch the wrong place. |
 | An invisible wall where something used to be, or something solid you think should break | Set `Debug=1`, drive up to it, press F8, and open an issue with `WreckingBall.log`. |
 | You fell through the ground near a fence | Make sure `BarrierNeedGround=1`, then report it the same way, with F8 at the spot. |
 
 ## License
 
-Released under the [GNU General Public License v3.0](LICENSE). The FH2 Mod Platform includes [MinHook](https://github.com/TsudaKageyu/minhook), whose license ships in the zip as `LICENSE-MinHook.txt`.
+Released under the [GNU General Public License v3.0](LICENSE). `third_party/fh2ml/FH2ML_v4.h` is FH2ML's, under the MIT license in [`third_party/fh2ml/LICENSE`](third_party/fh2ml/LICENSE).
 
 ## Disclaimer
 
