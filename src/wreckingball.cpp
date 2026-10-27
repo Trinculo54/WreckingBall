@@ -1368,8 +1368,9 @@ void d_sideswipeLoad(uint8_t* skill, void* node) { o_sideswipeLoad(skill, node);
 // ---- speed loss: the car that broke a tree loses speed by the tree's size ----
 // contact+0x08 is the other physics object; type 1 = a car. Its CCarDynamics
 // interface is at car+0x4C08: vtable +0x288 GetVelocity(out), +0x290 SetVelocity(in).
+// car+0x4D08 is its kind (ForzaCar's getter 0x140F62280): 0 is the player's own car.
 float g_speedLoss = 0.12f, g_speedLossExponent = 1.5f, g_speedLossMax = 0.45f;
-std::atomic<uint8_t*> g_lastCarDyn{nullptr};
+std::atomic<uint8_t*> g_lastCarDyn{nullptr}; // the player's car, for poles; may be gone by then
 void apply_speed_loss(void* contact, float size, float* lossOut, float* beforeMph, float* afterMph, float* velOut, float fixedLoss = -1) {
     __try {
         uint8_t* other = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(contact) + 8);
@@ -1385,7 +1386,7 @@ void apply_speed_loss(void* contact, float size, float* lossOut, float* beforeMp
         if (!dyn) return;
         void** dvt = *reinterpret_cast<void***>(dyn);
         if (reinterpret_cast<uintptr_t>(dvt[0x290 / 8]) != g_base + 0x12E3CF0) return; // not CCarDynamics::SetVelocity
-        g_lastCarDyn.store(dyn);
+        if (*reinterpret_cast<int32_t*>(car + 0x4D08) == 0) g_lastCarDyn.store(dyn);
         using GetVelFn = float* (*)(void*, float*);
         using SetVelFn = void (*)(void*, const float*);
         alignas(16) float v[4];
@@ -2954,17 +2955,19 @@ void break_pole(uint8_t* mgr, Pole& pl, const float* vel) {
         }
     }
     push_pending(p);
-    // speed loss on the player's car (known from its last smash), and some wood flying
+    // speed loss on the player's car (known from its last smash), and some wood flying. That car may
+    // have gone since (a car change), so its vtable is read with sread: __try only covers the calls.
     if (uint8_t* dyn = g_lastCarDyn.load()) {
-        __try {
-            void** dvt = *reinterpret_cast<void***>(dyn);
-            if (reinterpret_cast<uintptr_t>(dvt[0x290 / 8]) == g_base + 0x12E3CF0) {
+        const uint64_t vt = srd<uint64_t>(reinterpret_cast<uint64_t>(dyn));
+        if (vt && srd<uint64_t>(vt + 0x290) == g_base + 0x12E3CF0) {
+            __try {
+                void** dvt = reinterpret_cast<void**>(vt);
                 alignas(16) float v[4];
                 reinterpret_cast<float* (*)(void*, float*)>(dvt[0x288 / 8])(dyn, v);
                 alignas(16) float nv[4] = {v[0] * (1 - g_poleSpeedLoss), v[1], v[2] * (1 - g_poleSpeedLoss), v[3]};
                 reinterpret_cast<void (*)(void*, const float*)>(dvt[0x290 / 8])(dyn, nv);
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
     }
     float cv[4] = {vel[0], vel[1], vel[2], 0};
     spawn_effects(mgr, "Break_Wood,Break_WoodDust", pl.x, pl.y + 0.5f, pl.z, cv);
