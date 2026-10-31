@@ -3564,8 +3564,98 @@ void load_settings() {
     }
 }
 
+// ---- checking game code ----------------------------------------------------------------
+// Before the mod calls or hooks game code, its first bytes are compared with this build's.
+// Another mod hooking the same function through the platform puts a jump over them in memory;
+// the platform chains the two hooks, so that's fine, but memory no longer says which build this
+// is. So where memory differs, the bytes are read from the game's exe on disk, which is what
+// the platform compares with as well: it refuses to hook code that differs from the disk (Extra
+// Options' patches, or a mod that patches the game by itself), so that's still caught there.
+// If the exe can't be read (the platform can't check either then), a jump out of the game at
+// the start (the platform's), followed by the expected bytes or the int3s an instruction hook
+// pads with, is taken as another mod's hook.
+constexpr uint32_t GAME_SIZE_OF_IMAGE = 0x3A18000;   // the 24 Nov 2015 build
+HANDLE g_exe = INVALID_HANDLE_VALUE;
+uint64_t g_exeBase = 0;
+std::vector<IMAGE_SECTION_HEADER> g_exeSections;
+
+void open_game_exe() {
+    static bool tried = false;
+    if (std::exchange(tried, true)) return;
+    std::vector<std::wstring> paths;
+    if (g_api->game_dir && *g_api->game_dir) paths.push_back(std::wstring(g_api->game_dir) + L"\\forza_durango_release_final.exe");
+    paths.push_back(std::wstring(g_api->azimuth_dir) + L"\\forza_durango_release_final.exe");
+    for (const std::wstring& path : paths) {
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        static char head[0x1000];
+        DWORD got = 0;
+        const bool read = ReadFile(f, head, sizeof head, &got, nullptr) && got == sizeof head;
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(head);
+        const auto* nt  = read && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0 && dos->e_lfanew < 0x800
+                              ? reinterpret_cast<const IMAGE_NT_HEADERS64*>(head + dos->e_lfanew)
+                              : nullptr;
+        if (nt && nt->Signature == IMAGE_NT_SIGNATURE && nt->OptionalHeader.SizeOfImage == GAME_SIZE_OF_IMAGE) {
+            const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+            const unsigned n                = nt->FileHeader.NumberOfSections;
+            if (reinterpret_cast<const char*>(sec + n) <= head + sizeof head) {
+                g_exeSections.assign(sec, sec + n);
+                g_exeBase = nt->OptionalHeader.ImageBase;
+                g_exe     = f;
+                return;
+            }
+        }
+        CloseHandle(f);
+    }
+    logf("game code checks: the game's exe isn't readable in the game folder, so code another mod has hooked is told by its jump");
+}
+void close_game_exe() {
+    if (g_exe != INVALID_HANDLE_VALUE) CloseHandle(g_exe);
+    g_exe = INVALID_HANDLE_VALUE;
+}
+// The game's bytes at rva as the exe on disk has them; false if they can't be read.
+bool shipped_bytes(uintptr_t rva, void* out, size_t n) {
+    open_game_exe();
+    if (g_exe == INVALID_HANDLE_VALUE) return false;
+    for (const IMAGE_SECTION_HEADER& s : g_exeSections) {
+        if (rva < s.VirtualAddress || rva + n > (uint64_t)s.VirtualAddress + s.SizeOfRawData) continue;
+        const uint64_t off = s.PointerToRawData + (rva - s.VirtualAddress);
+        OVERLAPPED ov{};
+        ov.Offset     = static_cast<DWORD>(off);
+        ov.OffsetHigh = static_cast<DWORD>(off >> 32);
+        DWORD got     = 0;
+        return ReadFile(g_exe, out, static_cast<DWORD>(n), &got, &ov) && got == n;
+    }
+    return false;
+}
+
 bool code_matches(uintptr_t rva, const uint8_t* expect, size_t n) {
-    return std::memcmp(reinterpret_cast<void*>(g_base + rva), expect, n) == 0;
+    const uint8_t* live = reinterpret_cast<const uint8_t*>(g_base + rva);
+    if (std::memcmp(live, expect, n) == 0) return true;
+    uint8_t disk[32];
+    if (n <= sizeof disk && shipped_bytes(rva, disk, n)) return std::memcmp(disk, expect, n) == 0;
+    if (n <= 5 || live[0] != 0xE9) return false;   // jmp rel32
+    int32_t rel;
+    std::memcpy(&rel, live + 1, 4);
+    const uintptr_t to = g_base + rva + 5 + rel;
+    if (to >= g_base && to < g_base + GAME_SIZE_OF_IMAGE) return false;
+    for (size_t i = 5; i < n; ++i)
+        if (live[i] != expect[i] && live[i] != 0xCC) return false;
+    return true;
+}
+// The same for a function pointer in the game's data (a vtable slot): it's `fn`, or another
+// mod has hooked it and the exe on disk has `fn` there (without the exe: it points at code
+// outside the game, the platform's).
+bool slot_is(uintptr_t rva, uintptr_t fn) {
+    const uintptr_t live = *reinterpret_cast<const uintptr_t*>(g_base + rva);
+    if (live == g_base + fn) return true;
+    uint64_t disk = 0;
+    if (shipped_bytes(rva, &disk, sizeof disk)) return disk == g_exeBase + fn;
+    MEMORY_BASIC_INFORMATION mbi{};
+    return (live < g_base || live >= g_base + GAME_SIZE_OF_IMAGE) &&
+           VirtualQuery(reinterpret_cast<const void*>(live), &mbi, sizeof mbi) == sizeof mbi && mbi.State == MEM_COMMIT &&
+           (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
 }
 
 // ---- the Mods page (Pause > Settings > MODS, platform 2.3.0 / API 4) ----------------------
@@ -3672,11 +3762,11 @@ void add_mods_rows() {
     }
 }
 
-DWORD WINAPI setup_thread(LPVOID) {
+void setup() {
     void* base = g_api->wait_for_code(0xFFFFFFFFu);
     if (!base) {
         logf("game code never became ready; nothing hooked");
-        return 0;
+        return;
     }
     g_base = reinterpret_cast<uintptr_t>(base);
     logf("game at %p", base);
@@ -3690,14 +3780,13 @@ DWORD WINAPI setup_thread(LPVOID) {
     static const uint8_t dl[]     = {0x48, 0x8B, 0x41, 0x08, 0x44, 0x0F, 0xB7, 0xC2, 0xC1, 0xEA, 0x10}; // def lookup
     static const uint8_t dm[]     = {0x48, 0x8B, 0x41, 0x08, 0x44, 0x0F, 0xB7, 0xC2, 0xC1, 0xEA, 0x10}; // def render model
     if (!code_matches(RVA_DESERIALIZE, deser, sizeof deser) || !code_matches(RVA_GROUP_RESIZE, resize, sizeof resize) ||
-        !code_matches(RVA_CELL_ADD, add, sizeof add) ||
-        *reinterpret_cast<uintptr_t*>(g_base + RVA_MODELS_VTABLE + 21 * 8) != g_base + 0x1887290 ||
-        *reinterpret_cast<uintptr_t*>(g_base + RVA_COLLOBJ_VTABLE) != g_base + 0x378230 ||
+        !code_matches(RVA_CELL_ADD, add, sizeof add) || !slot_is(RVA_MODELS_VTABLE + 21 * 8, 0x1887290) ||
+        !slot_is(RVA_COLLOBJ_VTABLE, 0x378230) ||
         !code_matches(RVA_TEMPLATE_QUERY, tq, sizeof tq) || !code_matches(RVA_HOLDER_LOAD, hl, sizeof hl) ||
         !code_matches(0x12CC010, dl, sizeof dl) || !code_matches(0x12CD300, dm, sizeof dm)) {
         logf("ERROR: game code doesn't look like the 24 Nov 2015 build; nothing hooked");
         g_api->log(g_mod, "game code doesn't match; WreckingBall is off");
-        return 0;
+        return;
     }
 
     bool ok = true;
@@ -3713,20 +3802,28 @@ DWORD WINAPI setup_thread(LPVOID) {
                                reinterpret_cast<void*>(d_defLookup), reinterpret_cast<void**>(&o_defLookup)) != nullptr;
     ok &= g_api->hook_function(g_mod, "CollObj definition render model", reinterpret_cast<void*>(g_base + 0x12CD300),
                                reinterpret_cast<void*>(d_defModel), reinterpret_cast<void**>(&o_defModel)) != nullptr;
-    if (*reinterpret_cast<uintptr_t*>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8) == g_base + 0xA81770)
+    if (slot_is(RVA_DESTRUCTION_VTABLE + 14 * 8, 0xA81770))
         ok &= g_api->hook_pointer(g_mod, "Skills::Destruction::Load", reinterpret_cast<void**>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8),
                                   reinterpret_cast<void*>(d_destructionLoad), reinterpret_cast<void**>(&o_destructionLoad)) != nullptr;
-    if (*reinterpret_cast<uintptr_t*>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8) == g_base + 0xA81930)
+    if (slot_is(RVA_LUMBERJACK_VTABLE + 14 * 8, 0xA81930))
         ok &= g_api->hook_pointer(g_mod, "Skills::Lumberjack::Load", reinterpret_cast<void**>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8),
                                   reinterpret_cast<void*>(d_lumberjackLoad), reinterpret_cast<void**>(&o_lumberjackLoad)) != nullptr;
-    if (*reinterpret_cast<uintptr_t*>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8) == g_base + 0xA80D90)
+    if (slot_is(RVA_SIDESWIPE_VTABLE + 14 * 8, 0xA80D90))
         ok &= g_api->hook_pointer(g_mod, "Skills::SideSwipe::Load", reinterpret_cast<void**>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8),
                                   reinterpret_cast<void*>(d_sideswipeLoad), reinterpret_cast<void**>(&o_sideswipeLoad)) != nullptr;
+    // Solid pylons: another mod may add its own triangles here too (each detour calls on to the
+    // next). Not part of `ok`: without it the pylons just stay as the game has them.
     static const uint8_t gp[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x48, 0x89, 0x48, 0x08, 0x55};   // GetPolys
-    if (g_solidModels[0] && code_matches(0x12CC730, gp, sizeof gp))
-        ok &= g_api->hook_function(g_mod, "CollisionWorld::GetPolys", reinterpret_cast<void*>(g_base + 0x12CC730),
-                                   reinterpret_cast<void*>(d_getPolys), reinterpret_cast<void**>(&o_getPolys)) != nullptr;
-    else if (g_solidModels[0]) logf("solid pylons: game code doesn't match, off");
+    if (g_solidModels[0]) {
+        if (!code_matches(0x12CC730, gp, sizeof gp)) {
+            logf("solid pylons: game code doesn't match, off");
+            g_solidModels[0] = 0;
+        } else if (!g_api->hook_function(g_mod, "CollisionWorld::GetPolys", reinterpret_cast<void*>(g_base + 0x12CC730),
+                                         reinterpret_cast<void*>(d_getPolys), reinterpret_cast<void**>(&o_getPolys))) {
+            logf("solid pylons: the platform didn't allow the hook (see platform.log), off");
+            g_solidModels[0] = 0;
+        }
+    }
     static const uint8_t bp[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x50, 0x10, 0x48, 0x89, 0x48, 0x08, 0x55}; // break into pieces
     if (g_loadedLooks && code_matches(0x36AC80, bp, sizeof bp))
         ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
@@ -3758,7 +3855,7 @@ DWORD WINAPI setup_thread(LPVOID) {
     }
     static const uint8_t nu[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x48, 0x20, 0x4C, 0x89, 0x40, 0x18}; // render node update
     if (g_logStretch && !g_rowsOff) {
-        if (*reinterpret_cast<uintptr_t*>(g_base + 0x2EB8590 + 0x338) == g_base + 0x132B390 && code_matches(0x13A41E0, nu, sizeof nu)) {
+        if (slot_is(0x2EB8590 + 0x338, 0x132B390) && code_matches(0x13A41E0, nu, sizeof nu)) {
             ok &= g_api->hook_function(g_mod, "CTrackPresentation::BindCollObjInstanceToModel", reinterpret_cast<void*>(g_base + 0x132B390),
                                        reinterpret_cast<void*>(d_tpBind), reinterpret_cast<void**>(&o_tpBind)) != nullptr;
             ok &= g_api->hook_function(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
@@ -3776,12 +3873,17 @@ DWORD WINAPI setup_thread(LPVOID) {
                                reinterpret_cast<void*>(d_templateQuery), reinterpret_cast<void**>(&o_templateQuery)) != nullptr;
     if (!ok || !g_api->enable_hooks(g_mod, nullptr)) {
         logf("ERROR: hooking failed (see platform.log)");
-        return 0;
+        return;
     }
     logf("on: trees %s, logs %s, fences and railings %s, roadside clutter %s, telephone poles %s, solid pylons %s, debris clean-up %s%s",
          g_inject ? "yes" : "no", g_logs ? "yes" : "no", g_barriers ? "yes" : "no", g_clutter ? "yes" : "no", g_poles ? "yes" : "no",
          g_solidModels[0] && g_solidOn ? "yes" : "no", g_debrisCleanup ? "yes" : "no",
          g_debug ? " (debug log on, F8 snapshot)" : "");
+}
+
+DWORD WINAPI setup_thread(LPVOID) {
+    setup();
+    close_game_exe();   // only setup's checks read it
     return 0;
 }
 
