@@ -3810,6 +3810,10 @@ void setup() {
         return;
     }
 
+    // `ok`: the hooks the trees, fences and clutter need. If the platform refuses any other, only
+    // what needs that one goes off, with a log line. (The checks above pass for code another mod
+    // has hooked, but the platform can still refuse: another mod's patch over the same bytes, or
+    // code changed outside the platform.)
     bool ok = true;
     ok &= g_api->hook_function(g_mod, "ProceduralModelsData::Serialize", reinterpret_cast<void*>(g_base + RVA_DESERIALIZE),
                                reinterpret_cast<void*>(d_deserialize), reinterpret_cast<void**>(&o_deserialize)) != nullptr;
@@ -3823,15 +3827,19 @@ void setup() {
                                reinterpret_cast<void*>(d_defLookup), reinterpret_cast<void**>(&o_defLookup)) != nullptr;
     ok &= g_api->hook_function(g_mod, "CollObj definition render model", reinterpret_cast<void*>(g_base + 0x12CD300),
                                reinterpret_cast<void*>(d_defModel), reinterpret_cast<void**>(&o_defModel)) != nullptr;
-    if (slot_is(RVA_DESTRUCTION_VTABLE + 14 * 8, 0xA81770))
-        ok &= g_api->hook_pointer(g_mod, "Skills::Destruction::Load", reinterpret_cast<void**>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_destructionLoad), reinterpret_cast<void**>(&o_destructionLoad)) != nullptr;
-    if (slot_is(RVA_LUMBERJACK_VTABLE + 14 * 8, 0xA81930))
-        ok &= g_api->hook_pointer(g_mod, "Skills::Lumberjack::Load", reinterpret_cast<void**>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_lumberjackLoad), reinterpret_cast<void**>(&o_lumberjackLoad)) != nullptr;
-    if (slot_is(RVA_SIDESWIPE_VTABLE + 14 * 8, 0xA80D90))
-        ok &= g_api->hook_pointer(g_mod, "Skills::SideSwipe::Load", reinterpret_cast<void**>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_sideswipeLoad), reinterpret_cast<void**>(&o_sideswipeLoad)) != nullptr;
+    // the skills' retrigger delays: without a hook, that skill keeps the game's own delay
+    if (slot_is(RVA_DESTRUCTION_VTABLE + 14 * 8, 0xA81770) &&
+        !g_api->hook_pointer(g_mod, "Skills::Destruction::Load", reinterpret_cast<void**>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8),
+                             reinterpret_cast<void*>(d_destructionLoad), reinterpret_cast<void**>(&o_destructionLoad)))
+        logf("Wreckage retrigger delay: the platform didn't allow the hook (see platform.log), the game's own delay stays");
+    if (slot_is(RVA_LUMBERJACK_VTABLE + 14 * 8, 0xA81930) &&
+        !g_api->hook_pointer(g_mod, "Skills::Lumberjack::Load", reinterpret_cast<void**>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8),
+                             reinterpret_cast<void*>(d_lumberjackLoad), reinterpret_cast<void**>(&o_lumberjackLoad)))
+        logf("Lumberjack retrigger delay: the platform didn't allow the hook (see platform.log), the game's own delay stays");
+    if (slot_is(RVA_SIDESWIPE_VTABLE + 14 * 8, 0xA80D90) &&
+        !g_api->hook_pointer(g_mod, "Skills::SideSwipe::Load", reinterpret_cast<void**>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8),
+                             reinterpret_cast<void*>(d_sideswipeLoad), reinterpret_cast<void**>(&o_sideswipeLoad)))
+        logf("Sideswipe retrigger delay: the platform didn't allow the hook (see platform.log), the game's own delay stays");
     // Solid pylons: another mod may add its own triangles here too (each detour calls on to the
     // next). Not part of `ok`: without it the pylons just stay as the game has them.
     static const uint8_t gp[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x48, 0x89, 0x48, 0x08, 0x55};   // GetPolys
@@ -3846,10 +3854,11 @@ void setup() {
         }
     }
     static const uint8_t bp[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x50, 0x10, 0x48, 0x89, 0x48, 0x08, 0x55}; // break into pieces
-    if (g_loadedLooks && code_matches(0x36AC80, bp, sizeof bp))
-        ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
-                                   reinterpret_cast<void*>(d_breakPieces), reinterpret_cast<void**>(&o_breakPieces)) != nullptr;
-    else if (g_loadedLooks) logf("tree piece fallback: game code doesn't match, off");
+    if (g_loadedLooks && code_matches(0x36AC80, bp, sizeof bp)) {
+        if (!g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
+                                  reinterpret_cast<void*>(d_breakPieces), reinterpret_cast<void**>(&o_breakPieces)))
+            logf("tree piece fallback: the platform didn't allow the hook (see platform.log), off");
+    } else if (g_loadedLooks) logf("tree piece fallback: game code doesn't match, off");
     // Own models for loose fences: an instruction hook, so platform 2.6.0 (API 7) or later. Not
     // part of `ok`: without it fences just keep the look of the definition they break as.
     static const uint8_t wm[] = {0x48, 0x8D, 0x4D, 0xC0, 0x48, 0x89, 0x4C, 0x24, 0x20};   // lea rcx,[rbp-40h]; mov [rsp+20h],rcx
@@ -3885,13 +3894,17 @@ void setup() {
     }
     static const uint8_t nu[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x48, 0x20, 0x4C, 0x89, 0x40, 0x18}; // render node update
     if (g_logStretch && !g_rowsOff) {
-        if (slot_is(0x2EB8590 + 0x338, 0x132B390) && code_matches(0x13A41E0, nu, sizeof nu)) {
-            ok &= g_api->hook_function(g_mod, "CTrackPresentation::BindCollObjInstanceToModel", reinterpret_cast<void*>(g_base + 0x132B390),
-                                       reinterpret_cast<void*>(d_tpBind), reinterpret_cast<void**>(&o_tpBind)) != nullptr;
-            ok &= g_api->hook_function(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
-                                           reinterpret_cast<void*>(d_nodeUpdate), reinterpret_cast<void**>(&o_nodeUpdate)) != nullptr;
-        } else {
+        if (!slot_is(0x2EB8590 + 0x338, 0x132B390) || !code_matches(0x13A41E0, nu, sizeof nu)) {
             logf("log stretching: game code doesn't match, off");
+            g_logStretch = g_logProbe = 0;
+        } else if (!g_api->hook_function(g_mod, "CTrackPresentation::BindCollObjInstanceToModel", reinterpret_cast<void*>(g_base + 0x132B390),
+                                         reinterpret_cast<void*>(d_tpBind), reinterpret_cast<void**>(&o_tpBind)) ||
+                   !g_api->hook_function(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
+                                         reinterpret_cast<void*>(d_nodeUpdate), reinterpret_cast<void**>(&o_nodeUpdate))) {
+            // If only the second is refused, the bind hook stays: on its own it only notes the
+            // presentation and where pieces are bound. o_nodeUpdate stays null, so nothing is
+            // stretched and a falling pole isn't drawn with its own model.
+            logf("log stretching: the platform didn't allow the hook (see platform.log), off");
             g_logStretch = g_logProbe = 0;
         }
     }
