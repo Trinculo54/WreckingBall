@@ -3847,13 +3847,21 @@ void setup() {
     static const uint8_t mu[] = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55}; // CWorldCollObjMan update
     static const uint8_t so[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x88, 0x50, 0x10}; // SpawnObject
     // Logs, poles and debris clean-up all run from here, and each can be switched on and off
-    // in the game (Pause > Settings > MODS), so it's hooked whatever they're set to now.
-    if (code_matches(0x384C00, mu, sizeof mu) && code_matches(0x369690, so, sizeof so))
-        ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::Update", reinterpret_cast<void*>(g_base + 0x384C00),
-                                   reinterpret_cast<void*>(d_mgrUpdate), reinterpret_cast<void**>(&o_mgrUpdate)) != nullptr;
-    else {
-        logf("world update: game code doesn't match, logs, poles and debris clean-up are off");
+    // in the game (Pause > Settings > MODS), so it's hooked whatever they're set to now. The
+    // solid pylons need it too: only the pole scan finds them. Not part of `ok`: another mod
+    // may hook it as well (the platform runs both), and if the platform doesn't allow it, only
+    // these go off, not the trees, fences and clutter.
+    bool mgrHooked = false;
+    if (!code_matches(0x384C00, mu, sizeof mu) || !code_matches(0x369690, so, sizeof so))
+        logf("world update: game code doesn't match, logs, poles, solid pylons and debris clean-up are off");
+    else if (g_api->hook_function(g_mod, "CWorldCollObjMan::Update", reinterpret_cast<void*>(g_base + 0x384C00),
+                                  reinterpret_cast<void*>(d_mgrUpdate), reinterpret_cast<void**>(&o_mgrUpdate)))
+        mgrHooked = true;
+    else
+        logf("world update: the platform didn't allow the hook (see platform.log), logs, poles, solid pylons and debris clean-up are off");
+    if (!mgrHooked) {
         g_logs = g_poles = g_debrisCleanup = 0;
+        g_solidModels[0] = 0;
         g_rowsOff = true;
     }
     static const uint8_t nu[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x48, 0x20, 0x4C, 0x89, 0x40, 0x18}; // render node update
