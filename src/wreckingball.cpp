@@ -2058,6 +2058,8 @@ struct SlotRender { std::atomic<uint8_t*> inst{nullptr}, node{nullptr}; };
 SlotRender g_slotRender[0x1000];
 std::atomic<uint8_t*> g_slotTp[0x1000];   // the presentation each slot was bound in
 std::atomic<uint8_t*> g_trackPres{nullptr};
+bool g_rowsOff = false;   // the world update couldn't be hooked (then find_presentation looks for g_trackPres)
+void find_presentation(uint8_t* mgr);
 
 // Is this render model streamed in? (tp+0xF618)[model] is the model's entry; its resource
 // (+0x08) is null while the model isn't loaded, and a node bound to it is never drawn.
@@ -2091,6 +2093,7 @@ void d_breakPieces(uint8_t* mgr, uint8_t* obj) {
     uint32_t keep = 0;
     bool swapped = false;
     __try {
+        find_presentation(mgr);
         uint32_t id = *reinterpret_cast<uint32_t*>(obj + 0x124);
         int def = (int)(id & 0xFFFF);
         uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
@@ -2203,6 +2206,7 @@ void on_whole_model(FH2Context* c, void*) {
     if (!g_ownModels) return;
     uint8_t* obj = reinterpret_cast<uint8_t*>(c->r15);
     uint8_t* mgr = reinterpret_cast<uint8_t*>(c->r14);
+    find_presentation(mgr);   // already done by d_breakPieces when that's hooked
     uint8_t* tp  = g_trackPres.load(std::memory_order_relaxed);
     if (!tp || !obj || !mgr) return;
     const int model = static_cast<int>(c->rax);
@@ -2615,6 +2619,21 @@ uint8_t* track_presentation(uint8_t* mgr) {
             }
     }
     return nullptr;
+}
+// Without the world update hook nothing scans for poles, and log stretching (whose bind hook sees
+// the presentation too) is off, so nothing would ever find the track presentation, and "is this
+// model loaded" would always say yes: the tree piece fallback would never swap in a tree that's
+// loaded here, and fences would keep their stand-in's look. So then the break hooks look for it
+// themselves, at most twice a second, which also catches a map change.
+std::atomic<ULONGLONG> g_presNext{0};
+void find_presentation(uint8_t* mgr) {
+    if (!g_rowsOff || !mgr) return;
+    const ULONGLONG now = GetTickCount64();
+    ULONGLONG next      = g_presNext.load(std::memory_order_relaxed);
+    if (now < next || !g_presNext.compare_exchange_strong(next, now + 500)) return;
+    __try {
+        track_presentation(mgr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 // ---- solid pylons: placed models the game gives no collision ------------------------
 // FRA_OBJ_Pylon_ArrowShaped (8616-8618, the big square concrete electricity pylons) has no
@@ -3361,7 +3380,6 @@ const char* const DEFAULT_INI =
     "Debug=0\r\n";
 
 int g_checkUpdates = 1;
-bool g_rowsOff = false;   // the world update couldn't be hooked
 
 void load_settings() {
     std::wstring ini = g_dir + L"\\WreckingBall.ini";
@@ -3850,7 +3868,8 @@ void setup() {
     // in the game (Pause > Settings > MODS), so it's hooked whatever they're set to now. The
     // solid pylons need it too: only the pole scan finds them. Not part of `ok`: another mod
     // may hook it as well (the platform runs both), and if the platform doesn't allow it, only
-    // these go off, not the trees, fences and clutter.
+    // these go off, not the trees, fences and clutter (the break hooks then find the track
+    // presentation themselves, see find_presentation).
     bool mgrHooked = false;
     if (!code_matches(0x384C00, mu, sizeof mu) || !code_matches(0x369690, so, sizeof so))
         logf("world update: game code doesn't match, logs, poles, solid pylons and debris clean-up are off");
