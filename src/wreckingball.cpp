@@ -3840,19 +3840,6 @@ void setup() {
         !g_api->hook_pointer(g_mod, "Skills::SideSwipe::Load", reinterpret_cast<void**>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8),
                              reinterpret_cast<void*>(d_sideswipeLoad), reinterpret_cast<void**>(&o_sideswipeLoad)))
         logf("Sideswipe retrigger delay: the platform didn't allow the hook (see platform.log), the game's own delay stays");
-    // Solid pylons: another mod may add its own triangles here too (each detour calls on to the
-    // next). Not part of `ok`: without it the pylons just stay as the game has them.
-    static const uint8_t gp[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x48, 0x89, 0x48, 0x08, 0x55};   // GetPolys
-    if (g_solidModels[0]) {
-        if (!code_matches(0x12CC730, gp, sizeof gp)) {
-            logf("solid pylons: game code doesn't match, off");
-            g_solidModels[0] = 0;
-        } else if (!g_api->hook_function(g_mod, "CollisionWorld::GetPolys", reinterpret_cast<void*>(g_base + 0x12CC730),
-                                         reinterpret_cast<void*>(d_getPolys), reinterpret_cast<void**>(&o_getPolys))) {
-            logf("solid pylons: the platform didn't allow the hook (see platform.log), off");
-            g_solidModels[0] = 0;
-        }
-    }
     static const uint8_t bp[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x50, 0x10, 0x48, 0x89, 0x48, 0x08, 0x55}; // break into pieces
     if (g_loadedLooks && code_matches(0x36AC80, bp, sizeof bp)) {
         if (!g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
@@ -3890,7 +3877,22 @@ void setup() {
     if (!mgrHooked) {
         g_logs = g_poles = g_debrisCleanup = 0;
         g_solidModels[0] = 0;
-        g_rowsOff = true;
+        g_markEnabled    = 0;   // F8 is read there too
+        g_rowsOff        = true;
+    }
+    // Solid pylons: another mod may add its own triangles here too (each detour calls on to the
+    // next). Not part of `ok`: without it the pylons just stay as the game has them. Hooked only
+    // with the world update, as nothing else finds them.
+    static const uint8_t gp[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x48, 0x89, 0x48, 0x08, 0x55};   // GetPolys
+    if (g_solidModels[0]) {
+        if (!code_matches(0x12CC730, gp, sizeof gp)) {
+            logf("solid pylons: game code doesn't match, off");
+            g_solidModels[0] = 0;
+        } else if (!g_api->hook_function(g_mod, "CollisionWorld::GetPolys", reinterpret_cast<void*>(g_base + 0x12CC730),
+                                         reinterpret_cast<void*>(d_getPolys), reinterpret_cast<void**>(&o_getPolys))) {
+            logf("solid pylons: the platform didn't allow the hook (see platform.log), off");
+            g_solidModels[0] = 0;
+        }
     }
     static const uint8_t nu[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x48, 0x20, 0x4C, 0x89, 0x40, 0x18}; // render node update
     if (g_logStretch && !g_rowsOff) {
@@ -3921,7 +3923,7 @@ void setup() {
     logf("on: trees %s, logs %s, fences and railings %s, roadside clutter %s, telephone poles %s, solid pylons %s, debris clean-up %s%s",
          g_inject ? "yes" : "no", g_logs ? "yes" : "no", g_barriers ? "yes" : "no", g_clutter ? "yes" : "no", g_poles ? "yes" : "no",
          g_solidModels[0] && g_solidOn ? "yes" : "no", g_debrisCleanup ? "yes" : "no",
-         g_debug ? " (debug log on, F8 snapshot)" : "");
+         !g_debug ? "" : g_markEnabled ? " (debug log on, F8 snapshot)" : " (debug log on; F8 snapshot off without the world update)");
 }
 
 DWORD WINAPI setup_thread(LPVOID) {
