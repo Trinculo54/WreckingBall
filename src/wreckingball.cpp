@@ -3999,7 +3999,9 @@ FH2ModInfo mod_info(int checkUpdates) {
 // API 1 here (register_mod, log, azimuth_dir): registering is what puts "Old FH2 Mod Platform:
 // reinstall WreckingBall" on the title screen, so the player learns what to do instead of the
 // mod just vanishing. The mod's own state is left alone: Azimuth 1.0.1 loads both platform
-// DLLs, so a newer platform may have started the mod in this game already.
+// DLLs, and platform 2.8.0 can't see a copy older than 2.3.0 (it finds other copies by their
+// RestartHelper export), so neither stands down and a newer platform may have started the mod
+// in this game already.
 int start_on_old_platform(const FH2ModApi* api) {
     static const char kOld[] = "needs FH2 Mod Platform 2.2.0 or newer, so it's off. An older platform from another mod's zip is "
                                "running: extract WreckingBall's zip again to get the platform it comes with.";
