@@ -9,6 +9,29 @@ front of crowds stay solid. The game's files are never touched.
 Project page and source: https://github.com/Trinculo54/WreckingBall
 
 
+New in 1.3.3
+~~~~~~~~~~~~
+
+  - Works next to mods that hook the same game code, such as
+    NitroSystem (FnFNitro). With one of those installed, 1.3.0 turned
+    the falling telephone poles, logs, debris clean-up and solid
+    concrete pylons off, though the MODS page still showed them On.
+    Now both mods run.
+  - A hook the platform won't allow turns off only its own feature, and
+    WreckingBall.log says which. The rest of the mod keeps working.
+  - A crash when hitting a telephone pole is fixed. It could happen once
+    the last car to break something had gone, such as an AI car that
+    drove out of range, or after a car change. A pole's slowdown now
+    only ever goes to your own car, never an AI car.
+  - With the falling poles switched off, the concrete pylons are still
+    solid, broken trees away from the orchards still throw pieces you
+    can see, and loose fences still keep their own look.
+  - This zip has FH2 Mod Platform 2.8.0, as both d3dcompiler_47.dll and
+    DWrite.dll, so it works on Azimuth 1.0.3. If another mod's zip puts
+    a platform older than 2.2.0 back, the title screen now says to
+    reinstall WreckingBall, instead of the mod quietly not starting.
+
+
 Requirements
 ~~~~~~~~~~~~
 
@@ -61,6 +84,17 @@ game offers to restart for you when you leave the page. Under the switches
 are sliders for how much trees, bushes, fences and telephone poles slow you
 down; they apply as you move them. Changes are saved to WreckingBall.ini.
 
+Only wooden telephone poles fall: metal, railway and concrete pylons stay
+solid on purpose. The big square concrete pylons, which the game left
+without collision, are solid whether the falling poles are on or off.
+
+Other mods can hook the same game code as WreckingBall (NitroSystem
+hooks the world update the poles, logs and debris clean-up run from).
+The platform runs both, and fh2-mods\platform.log lists the hook as
+"shared with" both mods. If the platform won't allow one of
+WreckingBall's hooks, only the feature that needs it goes off, and
+WreckingBall.log says which.
+
 
 Settings (fh2-mods\WreckingBall.ini)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -108,6 +142,20 @@ attach WreckingBall.log.
     the title screen says "Old FH2 Mod Platform: reinstall
     WreckingBall": another mod's zip put an older platform back.
     Extract this zip again.
+  - The log says the game code doesn't match: with "nothing hooked",
+    you're not on the game build Azimuth uses, and the mod turns itself
+    off rather than patch the wrong place. If the line names one
+    feature, only that feature is off. For telephone poles, see below.
+  - Telephone poles don't fall: only wooden ones do (metal, railway and
+    concrete pylons stay solid on purpose). Check that "Falling
+    telephone poles" is On (Poles=1), then look in WreckingBall.log for
+    a line starting "world update:", which says why the poles are off.
+    "Game code doesn't match" there means the game isn't the build
+    WreckingBall was made for. On 1.3.0 it was usually another mod,
+    such as NitroSystem, that had hooked the same code first; 1.3.3
+    shares it, so update. "The platform didn't allow the hook" means
+    another mod changed that code in a way the two can't share, and the
+    "can't hook" line in fh2-mods\platform.log says how.
   - Things break, but WreckingBall's switches aren't on the MODS tab or
     in Pause > Settings > MODS: these come through the mediaoverride
     folder. With Extra Options installed, keep EnableMediaOverrides=1 in
