@@ -3983,21 +3983,52 @@ DWORD WINAPI setup_thread(LPVOID) {
     return 0;
 }
 
-} // namespace
-
-FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
-    if (api->api_version < 3) return 1;
-    g_api = api;
+FH2ModInfo mod_info(int checkUpdates) {
     FH2ModInfo info{};
-    info.size             = sizeof info;
+    info.size             = sizeof info;   // every platform from 2.0.0 takes it: register_mod only checks a minimum size
     info.name             = "WreckingBall";
     info.version          = WB_VERSION;
     info.github_repo      = "Trinculo54/WreckingBall";
     info.platform_version = FH2MOD_PLATFORM_VERSION;
     info.description      = "Lets you drive through the scenery like the later Horizon games: trees snap and throw logs, fences and railings burst apart, roadside clutter goes flying and telephone poles fall over. Festival fences and the barriers in front of crowds stay solid.";
+    info.check_updates    = checkUpdates;
+    return info;
+}
+
+// A platform from before hooks (2.0 or 2.1, API 1 and 2), put back by another mod's zip. Only
+// API 1 here (register_mod, log, azimuth_dir): registering is what puts "Old FH2 Mod Platform:
+// reinstall WreckingBall" on the title screen, so the player learns what to do instead of the
+// mod just vanishing. The mod's own state is left alone: Azimuth 1.0.1 loads both platform
+// DLLs, so a newer platform may have started the mod in this game already.
+int start_on_old_platform(const FH2ModApi* api) {
+    static const char kOld[] = "needs FH2 Mod Platform 2.2.0 or newer, so it's off. An older platform from another mod's zip is "
+                               "running: extract WreckingBall's zip again to get the platform it comes with.";
+    const std::wstring dir = std::wstring(api->azimuth_dir) + L"\\fh2-mods";
+    const FH2ModInfo info  = mod_info(GetPrivateProfileIntW(L"WreckingBall", L"CheckUpdates", 1, (dir + L"\\WreckingBall.ini").c_str()));
+    FH2Mod* mod            = api->register_mod(&info);
+    if (!mod) return 1;
+    api->log(mod, kOld);
+    if (!g_mod) {   // no newer platform has started it: say so in WreckingBall.log as well
+        if (FILE* f = _wfopen((dir + L"\\WreckingBall.log").c_str(), L"w")) {
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            for (const char* line : {"WreckingBall " WB_VERSION, kOld})
+                fprintf(f, "%02d:%02d:%02d.%03d %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, line);
+            fclose(f);
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
+FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
+    if (!api) return 1;
+    if (api->api_version < 3) return start_on_old_platform(api);   // hooks came with platform 2.2.0 (API 3)
+    g_api = api;
     g_dir = std::wstring(api->azimuth_dir) + L"\\fh2-mods";
     load_settings();
-    info.check_updates    = g_checkUpdates;
+    const FH2ModInfo info = mod_info(g_checkUpdates);
     g_mod                 = api->register_mod(&info);
     if (!g_mod) return 1;
     g_trunkPool = static_cast<TrunkNode*>(VirtualAlloc(nullptr, sizeof(TrunkNode) * TRUNK_POOL, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
