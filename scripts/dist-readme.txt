@@ -145,15 +145,13 @@ attach WreckingBall.log.
     WreckingBall. Check that d3dcompiler_47.dll and DWrite.dll are both
     next to azimuth.exe (Azimuth 1.0.3 only loads DWrite.dll), and
     WreckingBall.dll is in fh2-mods. The first line of
-    fh2-mods\platform.log says which platform version is running. If
-    fh2-mods\platform-standby.log is from your last launch, an older
-    platform from another mod's zip ran instead of this one: extract
-    this zip again. (That file stays once it's written, so check its
-    date.)
+    fh2-mods\platform.log says which platform version is running.
   - WreckingBall.log says "needs FH2 Mod Platform 2.2.0 or newer", or
     the title screen says "Old FH2 Mod Platform: reinstall
-    WreckingBall": another mod's zip put an older platform back.
-    Extract this zip again.
+    WreckingBall": another mod's zip put an older platform back. If
+    fh2-mods\platform-standby.log is from your last launch, it names the
+    older copy that ran instead of this zip's platform. (That file stays
+    once it's written, so check its date.) Extract this zip again.
   - The log says the game code doesn't match: with "nothing hooked",
     you're not on the game build Azimuth uses, and the mod turns itself
     off rather than patch the wrong place. If the line names one
