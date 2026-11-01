@@ -17,8 +17,15 @@ New in 1.3.3
     the falling telephone poles, logs, debris clean-up and solid
     concrete pylons off, though the MODS page still showed them On.
     Now both mods run.
-  - A hook the platform won't allow turns off only its own feature, and
-    WreckingBall.log says which. The rest of the mod keeps working.
+  - A hook the platform won't allow now turns off only what needs it,
+    for everything but the breakable trees, fences and clutter: the
+    falling poles, logs and debris clean-up (the world update), the
+    solid pylons, the size of logs and falling poles, the pieces broken
+    trees throw away from the orchards, fences keeping their own look,
+    and the skills' timing. WreckingBall.log says which. The trees,
+    fences and clutter still need all of their hooks: if the platform
+    refuses one of those, WreckingBall changes nothing, and its log says
+    "hooking failed".
   - A crash when hitting a telephone pole is fixed. It could happen once
     the last car to break something had gone, such as an AI car that
     drove out of range, or after a car change. A pole's slowdown now
@@ -92,8 +99,13 @@ Other mods can hook the same game code as WreckingBall (NitroSystem
 hooks the world update the poles, logs and debris clean-up run from).
 The platform runs both, and fh2-mods\platform.log lists the hook as
 "shared with" both mods. If the platform won't allow one of
-WreckingBall's hooks, only the feature that needs it goes off, and
-WreckingBall.log says which.
+WreckingBall's hooks, platform.log has a "can't hook" line that says
+why. For the falling poles, logs, debris clean-up, solid pylons, the
+size of logs and poles, tree pieces away from the orchards, fences' own
+look or a skill's timing, only that feature goes off, and
+WreckingBall.log says which. The breakable trees, fences and clutter
+need all of their hooks, though: if one of those is refused,
+WreckingBall changes nothing, and its log says "hooking failed".
 
 
 Settings (fh2-mods\WreckingBall.ini)
