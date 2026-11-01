@@ -24,19 +24,25 @@ It works on the mainland and on Storm Island. It's a single DLL. The game's file
 
 ## Install
 
-You'll need Forza Horizon 2 running on PC through Azimuth. Download the latest zip from the [Releases](../../releases) page, close Azimuth, and extract the zip into your Azimuth folder, the one with `azimuth.exe` in it. You should end up with `d3dcompiler_47.dll` next to `azimuth.exe` and `WreckingBall.dll` inside a `fh2-mods` folder. Start the game and drive into a tree.
+You'll need Forza Horizon 2 running on PC through Azimuth (from Azimuth 1.0.3, the platform is the `DWrite.dll` in this zip). Download the latest zip from the [Releases](../../releases) page, close Azimuth, and extract the zip into your Azimuth folder, the one with `azimuth.exe` in it. You should end up with `d3dcompiler_47.dll` and `DWrite.dll` next to `azimuth.exe`, and `WreckingBall.dll` inside a `fh2-mods` folder. Start the game and drive into a tree.
 
 WreckingBall doesn't need Forza Horizon 2 Extra Options, but it works fine alongside it.
 
 ### Updates
 
-When a newer WreckingBall is out, the title screen says so next to "PRESS (A) TO START". The mod asks GitHub at most every six hours. The version you have is in the first line of `fh2-mods\WreckingBall.log` and in the DLL's file properties.
+When a newer WreckingBall is out, the title screen says so under "PRESS (A) TO START". The mod asks GitHub at most every six hours. The version you have is in the first line of `fh2-mods\WreckingBall.log` and in the DLL's file properties.
 
 ### Using it with other FH2 mods
 
-`d3dcompiler_47.dll` is the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Every mod built on it ships the same file, so you can install them in any order and let them overwrite it. [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too. WreckingBall needs platform 2.2.0 or later, and the one in its zip is 2.6.1. The MODS page in the game comes with platform 2.3.0, its sliders with 2.4.0, the pause menu's MODS tab with 2.5.0, and loose fences keeping their own look with 2.6.0; on an older platform everything else works, those settings are in the ini only, and fence pieces look like the breakable fence they borrow.
+`d3dcompiler_47.dll` and `DWrite.dll` are the same file: the [FH2 Mod Platform](https://github.com/Trinculo54/FH2-Mod-Platform), the shared base for FH2 mods. Azimuth 1.0.3 loads `DWrite.dll`, older versions `d3dcompiler_47.dll`, and where both load only one of them runs. It loads every mod in the `fh2-mods` folder and lets them hook the game without stepping on each other. Each mod's zip ships the platform it was built with, and older ones only have `d3dcompiler_47.dll`. So extract WreckingBall last, or extract it again after installing a mod with an older platform. [Achievements](https://github.com/Trinculo54/fh2-achievements), [WheresMyBuddy](https://github.com/Trinculo54/WheresMyBuddy) and [FH2 Universal Radio](https://github.com/Trinculo54/FH2-Universal-Radio) are built on it too.
 
-**Playing with a racing wheel.** [fh2wheel](https://github.com/iamAzoDx/fh2wheel) ships its own `D3DCOMPILER_47.dll`, and only one can sit next to `azimuth.exe`. Install fh2wheel first, then extract WreckingBall's zip and let its `d3dcompiler_47.dll` overwrite fh2wheel's. Keep `fh2wheel.dll` and `fh2wheel-config.exe` next to `azimuth.exe`: the platform (2.6.1 or later) loads fh2wheel itself, and it's listed on the MODS tab.
+WreckingBall's zip has platform 2.8.0, and WreckingBall runs on 2.2.0 or later. The MODS page in the game comes with platform 2.3.0, its sliders with 2.4.0, the pause menu's MODS tab with 2.5.0, and loose fences keeping their own look with 2.6.0; on an older platform everything else works, those settings are in the ini only, and fence pieces look like the breakable fence they borrow. If another mod's zip puts an older platform back, the title screen says "Old FH2 Mod Platform: reinstall WreckingBall" under "PRESS (A) TO START". With a platform older than 2.2.0, WreckingBall doesn't start at all, and its log says it "needs FH2 Mod Platform 2.2.0 or newer". Either way, extract this zip again.
+
+**Playing with a racing wheel.** [fh2wheel](https://github.com/iamAzoDx/fh2wheel) ships its own `D3DCOMPILER_47.dll`, and only one can sit next to `azimuth.exe`. Install fh2wheel first, then extract WreckingBall's zip and let its `d3dcompiler_47.dll` overwrite fh2wheel's. Keep `fh2wheel.dll` and `fh2wheel-config.exe` next to `azimuth.exe`: the platform (2.6.1 or later) loads fh2wheel itself, and it's listed on the MODS tab. Azimuth 1.0.3 doesn't load any `d3dcompiler_47.dll`, so fh2wheel's own loader doesn't run there, but the platform's `DWrite.dll` still loads `fh2wheel.dll`.
+
+### On Linux (Wine or Proton)
+
+There's nothing Linux-specific about WreckingBall: a player's log has shown it loading and hooking the game just as on Windows. On Azimuth 1.0.3 the platform is `DWrite.dll`, and Wine has its own copy of that: if `fh2-mods\platform.log` never appears, add `dwrite` to the DLL override, `WINEDLLOVERRIDES="winmm,dwrite=n,b"`. Getting FH2 mods running on Linux in general is covered in the platform's [Linux notes](https://github.com/Trinculo54/FH2-Mod-Platform/blob/main/docs/linux.md).
 
 ## Settings
 
@@ -81,7 +87,7 @@ The Wreckage, Lumberjack and Sideswipe skills award at most once every 1, 2.5 an
 
 ## Uninstall
 
-Delete `fh2-mods\WreckingBall.dll` and `fh2-mods\WreckingBall.ini`. The next time the game starts, the platform takes the MODS tile back out (unless another mod has switches there). If you don't use any other FH2 mods, start the game once more after that, then delete `d3dcompiler_47.dll` and the `fh2-mods` folder too. Nothing else was changed.
+Delete `fh2-mods\WreckingBall.dll`, `fh2-mods\WreckingBall.ini` and `fh2-mods\WreckingBall.log` (and `WreckingBall-defs.txt`, if `Debug=1` made one). The next time the game starts, the platform takes the MODS tile back out (unless another mod has switches there). If you don't use any other FH2 mods, start the game once more after that, then delete `d3dcompiler_47.dll`, `DWrite.dll` and the `fh2-mods` folder too. Nothing else was changed.
 
 ## Known limitations
 
@@ -113,7 +119,7 @@ The mod is built with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releas
 ./scripts/build.sh
 ```
 
-`dist/` then holds `d3dcompiler_47.dll`, `fh2-mods/WreckingBall.dll` and a `README.txt`, ready to zip up. GitHub Actions does the same on every push and uploads the result as a build artifact. Pushing a tag like `v1.0.0` also creates a draft release with the zip attached, ready to be published. The version lives in `project(... VERSION x.y.z)` in `CMakeLists.txt`. Bump it before tagging: the tag build refuses to run if the two don't match, and it's what the mod compares against the latest GitHub release.
+`dist/` then holds the platform as `d3dcompiler_47.dll` and `DWrite.dll` (the same file), `fh2-mods/WreckingBall.dll`, a `README.txt` and the licences, ready to zip up. GitHub Actions does the same on every push, checks that the platform is there under both names, and uploads the result as a build artifact. Pushing a tag like `v1.0.0` also creates a draft release with the zip attached, ready to be published. The version lives in `project(... VERSION x.y.z)` in `CMakeLists.txt`. Bump it before tagging: the tag build refuses to run if the two don't match, and it's what the mod compares against the latest GitHub release.
 
 ## Troubleshooting
 
@@ -121,10 +127,12 @@ The mod is built with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releas
 
 | Symptom | Fix |
 |---|---|
-| Nothing breaks and there's no `WreckingBall.log` | Make sure `d3dcompiler_47.dll` is next to `azimuth.exe` and `WreckingBall.dll` is inside `fh2-mods`, then check `fh2-mods\platform.log`. |
+| Nothing breaks, and there's no `WreckingBall.log` or it wasn't written at this launch (check its time) | The platform isn't loading WreckingBall. Make sure `d3dcompiler_47.dll` and `DWrite.dll` are both next to `azimuth.exe` (Azimuth 1.0.3 only loads `DWrite.dll`) and `WreckingBall.dll` is inside `fh2-mods`, then check `fh2-mods\platform.log`: its first line says which platform version is running. If `fh2-mods\platform-standby.log` is from your last launch, an older platform from another mod's zip ran instead of this one: extract this zip again. (That file stays once it's written, so check its date.) |
+| `WreckingBall.log` says it "needs FH2 Mod Platform 2.2.0 or newer", or the title screen says "Old FH2 Mod Platform: reinstall WreckingBall" | Another mod's zip put an older platform back. Extract this zip again. |
 | The log says the game code doesn't match | You're not on the game build Azimuth uses. The mod turns itself off rather than patch the wrong place. |
 | An invisible wall where something used to be, or something solid you think should break | Set `Debug=1`, drive up to it, press F8, and open an issue with `WreckingBall.log`. |
 | You fell through the ground near a fence | Make sure `BarrierNeedGround=1`, then report it the same way, with F8 at the spot. |
+| Things break, but WreckingBall's switches aren't on the MODS tab or in Pause > Settings > MODS | Those come from files the platform gives the game through the `mediaoverride` folder. Platform 2.7.3 and newer make the game read that folder when Extra Options isn't loaded; with Extra Options, its `EnableMediaOverrides=1` in `FH2_ExtraOptions.ini` does it, so keep that on. The second line of `FH2_ExtraOptions.log` should start with `OK`. If it starts with `REFUSED` (for example "unsupported Azimuth build") or `DISABLED`, Extra Options changed nothing, so nothing reads the folder: install the Extra Options release made for your Azimuth version, or remove its `winmm.dll` so the platform reads the folder itself. The settings in `WreckingBall.ini` work either way. |
 
 ## License
 
