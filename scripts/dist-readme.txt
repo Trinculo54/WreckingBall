@@ -186,8 +186,11 @@ Uninstall
 
 Delete fh2-mods\WreckingBall.dll, fh2-mods\WreckingBall.ini and
 fh2-mods\WreckingBall.log (and WreckingBall-defs.txt, if Debug=1 made
-one). Delete d3dcompiler_47.dll, DWrite.dll and fh2-mods too if no other
-FH2 mods use them.
+one). The next time the game starts, the platform takes the MODS tile
+back out (unless another mod has switches there). If you don't use any
+other FH2 mods, start the game once more after that, then delete
+d3dcompiler_47.dll, DWrite.dll and the fh2-mods folder too. Nothing else
+was changed.
 
 
 License
