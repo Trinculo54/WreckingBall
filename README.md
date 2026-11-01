@@ -133,7 +133,7 @@ The mod is built with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releas
 
 ## Troubleshooting
 
-`fh2-mods\WreckingBall.log` starts fresh every launch. A working launch ends with a line like `on: trees yes, logs yes, fences and railings yes, ...`, and every change made on the MODS page is logged. The FH2 Mod Platform writes `fh2-mods\platform.log`, which shows whether the mod was loaded at all and lists every hook it put in, and which of them it shares with another mod. If the game crashes, the platform saves a report in `fh2-mods\crashes` that says which mod, if any, was involved.
+`fh2-mods\WreckingBall.log` starts fresh every launch. A working start-up logs a line like `on: trees yes, logs yes, fences and railings yes, ...` a few seconds in, and every change made on the MODS page is logged. The FH2 Mod Platform writes `fh2-mods\platform.log`, which shows whether the mod was loaded at all and lists every hook it put in, and which of them it shares with another mod. If the game crashes, the platform saves a report in `fh2-mods\crashes` that says which mod, if any, was involved.
 
 | Symptom | Fix |
 |---|---|

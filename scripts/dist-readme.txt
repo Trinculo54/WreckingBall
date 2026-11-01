@@ -135,10 +135,10 @@ When a newer version is out, the title screen says so under
 Troubleshooting
 ~~~~~~~~~~~~~~~
 
-fh2-mods\WreckingBall.log is written fresh each launch. A working launch
-ends with "on: trees yes, logs yes, ...". To report an invisible wall or
-something that should break, set Debug=1, drive up to it, press F8 and
-attach WreckingBall.log.
+fh2-mods\WreckingBall.log is written fresh each launch. A working
+start-up logs "on: trees yes, logs yes, ..." a few seconds in. To
+report an invisible wall or something that should break, set Debug=1,
+drive up to it, press F8 and attach WreckingBall.log.
 
   - Nothing breaks, and there's no WreckingBall.log or it wasn't written
     at this launch (check its time): the platform isn't loading
