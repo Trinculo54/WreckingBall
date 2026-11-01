@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # Bump VERSION before tagging a release (the tag build checks they match).
-project(wreckingball VERSION 1.3.0 LANGUAGES C CXX RC)
+project(wreckingball VERSION 1.3.3 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,8 +21,8 @@ else()
     add_link_options(-static)
 endif()
 
-# The FH2 Mod Platform (git submodule): d3dcompiler_47.dll, shipped next
-# to azimuth.exe, and fh2mod.h.
+# The FH2 Mod Platform (git submodule): d3dcompiler_47.dll and DWrite.dll
+# (the same file), shipped next to azimuth.exe, and fh2mod.h.
 add_subdirectory(platform)
 configure_file(cmake/version.h.in ${CMAKE_BINARY_DIR}/generated/fh2_version.h)
 

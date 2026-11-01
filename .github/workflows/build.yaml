@@ -40,6 +40,17 @@ jobs:
           CMAKE_GENERATOR: Ninja
         run: ./scripts/build.sh
 
+      - name: Check the zip has the platform under both names
+        run: |
+          # Azimuth 1.0.3 only loads DWrite.dll, and Azimuth before 1.0.1 only
+          # d3dcompiler_47.dll, so a zip without either leaves some players
+          # with no platform and no mod at all.
+          for f in d3dcompiler_47.dll DWrite.dll fh2-mods/WreckingBall.dll README.txt LICENSE.txt LICENSE-MinHook.txt; do
+            [ -f "dist/$f" ] || { echo "::error::dist/$f is missing."; exit 1; }
+          done
+          cmp -s dist/d3dcompiler_47.dll dist/DWrite.dll ||
+            { echo "::error::dist/d3dcompiler_47.dll and dist/DWrite.dll aren't the same file."; exit 1; }
+
       - name: Name the build
         id: name
         run: |

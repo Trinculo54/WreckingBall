@@ -1368,8 +1368,9 @@ void d_sideswipeLoad(uint8_t* skill, void* node) { o_sideswipeLoad(skill, node);
 // ---- speed loss: the car that broke a tree loses speed by the tree's size ----
 // contact+0x08 is the other physics object; type 1 = a car. Its CCarDynamics
 // interface is at car+0x4C08: vtable +0x288 GetVelocity(out), +0x290 SetVelocity(in).
+// car+0x4D08 is its kind (ForzaCar's getter 0x140F62280): 0 is the player's own car.
 float g_speedLoss = 0.12f, g_speedLossExponent = 1.5f, g_speedLossMax = 0.45f;
-std::atomic<uint8_t*> g_lastCarDyn{nullptr};
+std::atomic<uint8_t*> g_playerCar{nullptr}; // for poles; it may be gone by then (see break_pole)
 void apply_speed_loss(void* contact, float size, float* lossOut, float* beforeMph, float* afterMph, float* velOut, float fixedLoss = -1) {
     __try {
         uint8_t* other = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(contact) + 8);
@@ -1385,7 +1386,7 @@ void apply_speed_loss(void* contact, float size, float* lossOut, float* beforeMp
         if (!dyn) return;
         void** dvt = *reinterpret_cast<void***>(dyn);
         if (reinterpret_cast<uintptr_t>(dvt[0x290 / 8]) != g_base + 0x12E3CF0) return; // not CCarDynamics::SetVelocity
-        g_lastCarDyn.store(dyn);
+        if (*reinterpret_cast<int32_t*>(car + 0x4D08) == 0) g_playerCar.store(car);
         using GetVelFn = float* (*)(void*, float*);
         using SetVelFn = void (*)(void*, const float*);
         alignas(16) float v[4];
@@ -2057,6 +2058,8 @@ struct SlotRender { std::atomic<uint8_t*> inst{nullptr}, node{nullptr}; };
 SlotRender g_slotRender[0x1000];
 std::atomic<uint8_t*> g_slotTp[0x1000];   // the presentation each slot was bound in
 std::atomic<uint8_t*> g_trackPres{nullptr};
+bool g_rowsOff = false;   // the world update couldn't be hooked (then find_presentation looks for g_trackPres)
+void find_presentation(uint8_t* mgr);
 
 // Is this render model streamed in? (tp+0xF618)[model] is the model's entry; its resource
 // (+0x08) is null while the model isn't loaded, and a node bound to it is never drawn.
@@ -2090,6 +2093,7 @@ void d_breakPieces(uint8_t* mgr, uint8_t* obj) {
     uint32_t keep = 0;
     bool swapped = false;
     __try {
+        find_presentation(mgr);
         uint32_t id = *reinterpret_cast<uint32_t*>(obj + 0x124);
         int def = (int)(id & 0xFFFF);
         uint8_t* table = *reinterpret_cast<uint8_t**>(mgr + 0x4C8);
@@ -2202,6 +2206,7 @@ void on_whole_model(FH2Context* c, void*) {
     if (!g_ownModels) return;
     uint8_t* obj = reinterpret_cast<uint8_t*>(c->r15);
     uint8_t* mgr = reinterpret_cast<uint8_t*>(c->r14);
+    find_presentation(mgr);   // already done by d_breakPieces when that's hooked
     uint8_t* tp  = g_trackPres.load(std::memory_order_relaxed);
     if (!tp || !obj || !mgr) return;
     const int model = static_cast<int>(c->rax);
@@ -2615,6 +2620,22 @@ uint8_t* track_presentation(uint8_t* mgr) {
     }
     return nullptr;
 }
+// Without the world update hook nothing scans for poles, and log stretching (whose bind hook sees
+// the presentation too) is off, so nothing would ever find the track presentation, and "is this
+// model loaded" would always say yes: the tree piece fallback would never swap in a tree that's
+// loaded here, and fences would keep their stand-in's look. So then the break hooks look for it
+// themselves, at most twice a second, which also catches a map change. (With the world update
+// hooked, it looks every 30 frames, poles on or off: scan_poles, or scan_without_poles.)
+std::atomic<ULONGLONG> g_presNext{0};
+void find_presentation(uint8_t* mgr) {
+    if (!g_rowsOff || !mgr) return;
+    const ULONGLONG now = GetTickCount64();
+    ULONGLONG next      = g_presNext.load(std::memory_order_relaxed);
+    if (now < next || !g_presNext.compare_exchange_strong(next, now + 500)) return;
+    __try {
+        track_presentation(mgr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
 // ---- solid pylons: placed models the game gives no collision ------------------------
 // FRA_OBJ_Pylon_ArrowShaped (8616-8618, the big square concrete electricity pylons) has no
 // collision at all in the game. CollisionWorld::GetPolys (0x1412CC730(world, box, max, tris,
@@ -2733,6 +2754,16 @@ void build_solids(uint8_t* b, size_t n) {
     g_nSolids.store((int)out.size());
     logf("solid pylons: %zu found (models %s), %.2f m wide, %.1f m tall", out.size(), g_solidModels, g_solidHalf * 2, g_solidHeight);
 }
+// The placed models the pylons were last built from. They're built again only when those change
+// (a map change), whichever of the pole scan and the poles-off scan (scan_without_poles) sees it
+// first. Both run in the world update, so these are only touched on its thread.
+uint8_t* g_solidScanBase = nullptr;
+size_t g_solidScanCount = 0;
+void solids_for(uint8_t* b, size_t n) {
+    if (b == g_solidScanBase && n == g_solidScanCount) return;
+    build_solids(b, n);
+    g_solidScanBase = b; g_solidScanCount = n;
+}
 
 // learn how the game stores a triangle's normal, from its own triangles
 void learn_tri_convention(uint8_t** tris, uint8_t** verts, int n) {
@@ -2821,6 +2852,13 @@ void forget_poles() {
     g_poleScanBase  = nullptr;
     g_poleScanCount = 0;
 }
+// Which map n placed models are: the breakable definitions say (Storm Island numbers them
+// differently), or, before any has been seen, their number (the mainland has about 88,000 placed
+// models, the island about 14,000).
+bool island_map(size_t n) {
+    const DefMap* dm = g_lastDefMap.load(std::memory_order_acquire);
+    return dm ? dm->moved : n < 40000;
+}
 void scan_poles(uint8_t* mgr) {
     uint8_t* tp = track_presentation(mgr);
     if (!tp) return;
@@ -2836,14 +2874,10 @@ void scan_poles(uint8_t* mgr) {
     if (b == g_poleScanBase && n == g_poleScanCount) return;
     if (!readable(b, 0x70) || !readable(e - 0x70, 0x70)) return;   // still being built
     g_poleScanBase = b; g_poleScanCount = n;
-    // Which map: the breakable definitions say (Storm Island numbers them differently), or,
-    // before any has been seen, its size (the mainland has about 88,000 placed models, the
-    // island about 14,000).
-    const DefMap* dm = g_lastDefMap.load(std::memory_order_acquire);
-    const bool island = dm ? dm->moved : n < 40000;
+    const bool island = island_map(n);
     if (island != g_islandMap) logf("poles: on %s", island ? "Storm Island" : "the mainland");
     g_islandMap = island;
-    if (g_solidModels[0] && !island) build_solids(b, n);   // the concrete pylons are only on the mainland
+    if (g_solidModels[0] && !island) solids_for(b, n);   // the concrete pylons are only on the mainland
     std::vector<Pole> found;
     int perModel = 0, tooBig = 0;
     int scaleHist[8] = {};   // 0.25-wide buckets from 0.5
@@ -2954,17 +2988,25 @@ void break_pole(uint8_t* mgr, Pole& pl, const float* vel) {
         }
     }
     push_pending(p);
-    // speed loss on the player's car (known from its last smash), and some wood flying
-    if (uint8_t* dyn = g_lastCarDyn.load()) {
-        __try {
-            void** dvt = *reinterpret_cast<void***>(dyn);
-            if (reinterpret_cast<uintptr_t>(dvt[0x290 / 8]) == g_base + 0x12E3CF0) {
+    // speed loss on the player's car (known from its last smash), and some wood flying. That car may
+    // have gone since (a car change) and its memory be another car's now, and a simulation restart
+    // gives every car new dynamics (0x140FAABE0), whose old block can go to an AI car's. So its
+    // dynamics are looked up again through the car, with sread: still the player's (kind 0), and
+    // still CCarDynamics. __try only covers the calls.
+    if (const uint64_t car = reinterpret_cast<uint64_t>(g_playerCar.load())) {
+        int32_t kind       = -1;
+        const uint64_t dyn = sread(car + 0x4D08, &kind, sizeof kind) && kind == 0 ? srd<uint64_t>(car + 0x4C08) : 0;
+        const uint64_t vt  = dyn ? srd<uint64_t>(dyn) : 0;
+        const uint64_t get = vt ? srd<uint64_t>(vt + 0x288) : 0;
+        if (get && srd<uint64_t>(vt + 0x290) == g_base + 0x12E3CF0) {
+            __try {
+                void* d = reinterpret_cast<void*>(dyn);
                 alignas(16) float v[4];
-                reinterpret_cast<float* (*)(void*, float*)>(dvt[0x288 / 8])(dyn, v);
+                reinterpret_cast<float* (*)(void*, float*)>(get)(d, v);
                 alignas(16) float nv[4] = {v[0] * (1 - g_poleSpeedLoss), v[1], v[2] * (1 - g_poleSpeedLoss), v[3]};
-                reinterpret_cast<void (*)(void*, const float*)>(dvt[0x290 / 8])(dyn, nv);
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                reinterpret_cast<void (*)(void*, const float*)>(g_base + 0x12E3CF0)(d, nv);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
     }
     float cv[4] = {vel[0], vel[1], vel[2], 0};
     spawn_effects(mgr, "Break_Wood,Break_WoodDust", pl.x, pl.y + 0.5f, pl.z, cv);
@@ -3003,6 +3045,25 @@ void update_poles(uint8_t* mgr) {
         float cx = ax + sx * t - pl.x, cz = az + sz * t - pl.z;
         if (cx * cx + cz * cz < 1.15f * 1.15f) break_pole(mgr, pl, vel);
     }
+}
+// With the poles off (Poles=0, or switched off on the Mods page), the pole scan doesn't run, and it
+// was what kept the track presentation known and built the solid pylons. Unless the log stretching
+// bind hook happened to see it, "is this model loaded" then always said yes (the tree piece fallback
+// never swapped, logs could pick a look that isn't loaded, fences kept their stand-in's look), and
+// the pylons stayed as the game has them although the "on:" line said they were solid. So the world
+// update does both itself while the poles are off, on the same thread and as often as the pole scan
+// (which takes over when they're switched on). Their collision isn't touched: they stay solid.
+bool g_trackScanOff = false;   // it kept crashing
+void scan_without_poles(uint8_t* mgr) {
+    uint8_t* tp = track_presentation(mgr);
+    if (!tp || !g_solidModels[0] || !g_solidOn) return;
+    const uint64_t t = reinterpret_cast<uint64_t>(tp);
+    uint8_t* b = reinterpret_cast<uint8_t*>(srd<uint64_t>(t + 0xFB78));
+    uint8_t* e = reinterpret_cast<uint8_t*>(srd<uint64_t>(t + 0xFB80));
+    if (!b || e <= b) return;
+    const size_t n = (size_t)(e - b) / 0x70;
+    if (!readable(b, 0x70) || !readable(e - 0x70, 0x70)) return;   // still being built
+    if (!island_map(n)) solids_for(b, n);   // the concrete pylons are only on the mainland
 }
 
 // ---- debris clean-up -------------------------------------------------------------
@@ -3134,6 +3195,17 @@ void d_mgrUpdate(uint8_t* mgr, float a, float b) {
                 pause    = 120;
                 if (++crashes >= 20) { logf("poles crashed %d times; turned off", crashes); g_poles = 0; }
                 else logf("poles crashed; trying again shortly");
+            }
+        }
+    } else if (!g_trackScanOff) {
+        // the poles are off: still look for the track presentation and the solid pylons
+        static int frame = 0, crashes = 0;
+        if ((frame++ % 30) == 0) {
+            __try {
+                scan_without_poles(mgr);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                if (++crashes >= 20) { logf("track scan with the poles off crashed %d times; turned off", crashes); g_trackScanOff = true; }
+                else logf("track scan with the poles off crashed; trying again shortly");
             }
         }
     }
@@ -3358,7 +3430,6 @@ const char* const DEFAULT_INI =
     "Debug=0\r\n";
 
 int g_checkUpdates = 1;
-bool g_rowsOff = false;   // the world update couldn't be hooked
 
 void load_settings() {
     std::wstring ini = g_dir + L"\\WreckingBall.ini";
@@ -3564,8 +3635,98 @@ void load_settings() {
     }
 }
 
+// ---- checking game code ----------------------------------------------------------------
+// Before the mod calls or hooks game code, its first bytes are compared with this build's.
+// Another mod hooking the same function through the platform puts a jump over them in memory;
+// the platform chains the two hooks, so that's fine, but memory no longer says which build this
+// is. So where memory differs, the bytes are read from the game's exe on disk, which is what
+// the platform compares with as well: it refuses to hook code that differs from the disk (Extra
+// Options' patches, or a mod that patches the game by itself), so that's still caught there.
+// If the exe can't be read (the platform can't check either then), a jump out of the game at
+// the start (the platform's), followed by the expected bytes or the int3s an instruction hook
+// pads with, is taken as another mod's hook.
+constexpr uint32_t GAME_SIZE_OF_IMAGE = 0x3A18000;   // the 24 Nov 2015 build
+HANDLE g_exe = INVALID_HANDLE_VALUE;
+uint64_t g_exeBase = 0;
+std::vector<IMAGE_SECTION_HEADER> g_exeSections;
+
+void open_game_exe() {
+    static bool tried = false;
+    if (std::exchange(tried, true)) return;
+    std::vector<std::wstring> paths;
+    if (g_api->game_dir && *g_api->game_dir) paths.push_back(std::wstring(g_api->game_dir) + L"\\forza_durango_release_final.exe");
+    paths.push_back(std::wstring(g_api->azimuth_dir) + L"\\forza_durango_release_final.exe");
+    for (const std::wstring& path : paths) {
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        static char head[0x1000];
+        DWORD got = 0;
+        const bool read = ReadFile(f, head, sizeof head, &got, nullptr) && got == sizeof head;
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(head);
+        const auto* nt  = read && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0 && dos->e_lfanew < 0x800
+                              ? reinterpret_cast<const IMAGE_NT_HEADERS64*>(head + dos->e_lfanew)
+                              : nullptr;
+        if (nt && nt->Signature == IMAGE_NT_SIGNATURE && nt->OptionalHeader.SizeOfImage == GAME_SIZE_OF_IMAGE) {
+            const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+            const unsigned n                = nt->FileHeader.NumberOfSections;
+            if (reinterpret_cast<const char*>(sec + n) <= head + sizeof head) {
+                g_exeSections.assign(sec, sec + n);
+                g_exeBase = nt->OptionalHeader.ImageBase;
+                g_exe     = f;
+                return;
+            }
+        }
+        CloseHandle(f);
+    }
+    logf("game code checks: the game's exe isn't readable in the game folder, so code another mod has hooked is told by its jump");
+}
+void close_game_exe() {
+    if (g_exe != INVALID_HANDLE_VALUE) CloseHandle(g_exe);
+    g_exe = INVALID_HANDLE_VALUE;
+}
+// The game's bytes at rva as the exe on disk has them; false if they can't be read.
+bool shipped_bytes(uintptr_t rva, void* out, size_t n) {
+    open_game_exe();
+    if (g_exe == INVALID_HANDLE_VALUE) return false;
+    for (const IMAGE_SECTION_HEADER& s : g_exeSections) {
+        if (rva < s.VirtualAddress || rva + n > (uint64_t)s.VirtualAddress + s.SizeOfRawData) continue;
+        const uint64_t off = s.PointerToRawData + (rva - s.VirtualAddress);
+        OVERLAPPED ov{};
+        ov.Offset     = static_cast<DWORD>(off);
+        ov.OffsetHigh = static_cast<DWORD>(off >> 32);
+        DWORD got     = 0;
+        return ReadFile(g_exe, out, static_cast<DWORD>(n), &got, &ov) && got == n;
+    }
+    return false;
+}
+
 bool code_matches(uintptr_t rva, const uint8_t* expect, size_t n) {
-    return std::memcmp(reinterpret_cast<void*>(g_base + rva), expect, n) == 0;
+    const uint8_t* live = reinterpret_cast<const uint8_t*>(g_base + rva);
+    if (std::memcmp(live, expect, n) == 0) return true;
+    uint8_t disk[32];
+    if (n <= sizeof disk && shipped_bytes(rva, disk, n)) return std::memcmp(disk, expect, n) == 0;
+    if (n <= 5 || live[0] != 0xE9) return false;   // jmp rel32
+    int32_t rel;
+    std::memcpy(&rel, live + 1, 4);
+    const uintptr_t to = g_base + rva + 5 + rel;
+    if (to >= g_base && to < g_base + GAME_SIZE_OF_IMAGE) return false;
+    for (size_t i = 5; i < n; ++i)
+        if (live[i] != expect[i] && live[i] != 0xCC) return false;
+    return true;
+}
+// The same for a function pointer in the game's data (a vtable slot): it's `fn`, or another
+// mod has hooked it and the exe on disk has `fn` there (without the exe: it points at code
+// outside the game, the platform's).
+bool slot_is(uintptr_t rva, uintptr_t fn) {
+    const uintptr_t live = *reinterpret_cast<const uintptr_t*>(g_base + rva);
+    if (live == g_base + fn) return true;
+    uint64_t disk = 0;
+    if (shipped_bytes(rva, &disk, sizeof disk)) return disk == g_exeBase + fn;
+    MEMORY_BASIC_INFORMATION mbi{};
+    return (live < g_base || live >= g_base + GAME_SIZE_OF_IMAGE) &&
+           VirtualQuery(reinterpret_cast<const void*>(live), &mbi, sizeof mbi) == sizeof mbi && mbi.State == MEM_COMMIT &&
+           (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
 }
 
 // ---- the Mods page (Pause > Settings > MODS, platform 2.3.0 / API 4) ----------------------
@@ -3672,11 +3833,11 @@ void add_mods_rows() {
     }
 }
 
-DWORD WINAPI setup_thread(LPVOID) {
+void setup() {
     void* base = g_api->wait_for_code(0xFFFFFFFFu);
     if (!base) {
         logf("game code never became ready; nothing hooked");
-        return 0;
+        return;
     }
     g_base = reinterpret_cast<uintptr_t>(base);
     logf("game at %p", base);
@@ -3690,16 +3851,19 @@ DWORD WINAPI setup_thread(LPVOID) {
     static const uint8_t dl[]     = {0x48, 0x8B, 0x41, 0x08, 0x44, 0x0F, 0xB7, 0xC2, 0xC1, 0xEA, 0x10}; // def lookup
     static const uint8_t dm[]     = {0x48, 0x8B, 0x41, 0x08, 0x44, 0x0F, 0xB7, 0xC2, 0xC1, 0xEA, 0x10}; // def render model
     if (!code_matches(RVA_DESERIALIZE, deser, sizeof deser) || !code_matches(RVA_GROUP_RESIZE, resize, sizeof resize) ||
-        !code_matches(RVA_CELL_ADD, add, sizeof add) ||
-        *reinterpret_cast<uintptr_t*>(g_base + RVA_MODELS_VTABLE + 21 * 8) != g_base + 0x1887290 ||
-        *reinterpret_cast<uintptr_t*>(g_base + RVA_COLLOBJ_VTABLE) != g_base + 0x378230 ||
+        !code_matches(RVA_CELL_ADD, add, sizeof add) || !slot_is(RVA_MODELS_VTABLE + 21 * 8, 0x1887290) ||
+        !slot_is(RVA_COLLOBJ_VTABLE, 0x378230) ||
         !code_matches(RVA_TEMPLATE_QUERY, tq, sizeof tq) || !code_matches(RVA_HOLDER_LOAD, hl, sizeof hl) ||
         !code_matches(0x12CC010, dl, sizeof dl) || !code_matches(0x12CD300, dm, sizeof dm)) {
         logf("ERROR: game code doesn't look like the 24 Nov 2015 build; nothing hooked");
         g_api->log(g_mod, "game code doesn't match; WreckingBall is off");
-        return 0;
+        return;
     }
 
+    // `ok`: the hooks the trees, fences and clutter need. If the platform refuses any other, only
+    // what needs that one goes off, with a log line. (The checks above pass for code another mod
+    // has hooked, but the platform can still refuse: another mod's patch over the same bytes, or
+    // code changed outside the platform.)
     bool ok = true;
     ok &= g_api->hook_function(g_mod, "ProceduralModelsData::Serialize", reinterpret_cast<void*>(g_base + RVA_DESERIALIZE),
                                reinterpret_cast<void*>(d_deserialize), reinterpret_cast<void**>(&o_deserialize)) != nullptr;
@@ -3713,25 +3877,25 @@ DWORD WINAPI setup_thread(LPVOID) {
                                reinterpret_cast<void*>(d_defLookup), reinterpret_cast<void**>(&o_defLookup)) != nullptr;
     ok &= g_api->hook_function(g_mod, "CollObj definition render model", reinterpret_cast<void*>(g_base + 0x12CD300),
                                reinterpret_cast<void*>(d_defModel), reinterpret_cast<void**>(&o_defModel)) != nullptr;
-    if (*reinterpret_cast<uintptr_t*>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8) == g_base + 0xA81770)
-        ok &= g_api->hook_pointer(g_mod, "Skills::Destruction::Load", reinterpret_cast<void**>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_destructionLoad), reinterpret_cast<void**>(&o_destructionLoad)) != nullptr;
-    if (*reinterpret_cast<uintptr_t*>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8) == g_base + 0xA81930)
-        ok &= g_api->hook_pointer(g_mod, "Skills::Lumberjack::Load", reinterpret_cast<void**>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_lumberjackLoad), reinterpret_cast<void**>(&o_lumberjackLoad)) != nullptr;
-    if (*reinterpret_cast<uintptr_t*>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8) == g_base + 0xA80D90)
-        ok &= g_api->hook_pointer(g_mod, "Skills::SideSwipe::Load", reinterpret_cast<void**>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8),
-                                  reinterpret_cast<void*>(d_sideswipeLoad), reinterpret_cast<void**>(&o_sideswipeLoad)) != nullptr;
-    static const uint8_t gp[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x48, 0x89, 0x48, 0x08, 0x55};   // GetPolys
-    if (g_solidModels[0] && code_matches(0x12CC730, gp, sizeof gp))
-        ok &= g_api->hook_function(g_mod, "CollisionWorld::GetPolys", reinterpret_cast<void*>(g_base + 0x12CC730),
-                                   reinterpret_cast<void*>(d_getPolys), reinterpret_cast<void**>(&o_getPolys)) != nullptr;
-    else if (g_solidModels[0]) logf("solid pylons: game code doesn't match, off");
+    // the skills' retrigger delays: without a hook, that skill keeps the game's own delay
+    if (slot_is(RVA_DESTRUCTION_VTABLE + 14 * 8, 0xA81770) &&
+        !g_api->hook_pointer(g_mod, "Skills::Destruction::Load", reinterpret_cast<void**>(g_base + RVA_DESTRUCTION_VTABLE + 14 * 8),
+                             reinterpret_cast<void*>(d_destructionLoad), reinterpret_cast<void**>(&o_destructionLoad)))
+        logf("Wreckage retrigger delay: the platform didn't allow the hook (see platform.log), the game's own delay stays");
+    if (slot_is(RVA_LUMBERJACK_VTABLE + 14 * 8, 0xA81930) &&
+        !g_api->hook_pointer(g_mod, "Skills::Lumberjack::Load", reinterpret_cast<void**>(g_base + RVA_LUMBERJACK_VTABLE + 14 * 8),
+                             reinterpret_cast<void*>(d_lumberjackLoad), reinterpret_cast<void**>(&o_lumberjackLoad)))
+        logf("Lumberjack retrigger delay: the platform didn't allow the hook (see platform.log), the game's own delay stays");
+    if (slot_is(RVA_SIDESWIPE_VTABLE + 14 * 8, 0xA80D90) &&
+        !g_api->hook_pointer(g_mod, "Skills::SideSwipe::Load", reinterpret_cast<void**>(g_base + RVA_SIDESWIPE_VTABLE + 14 * 8),
+                             reinterpret_cast<void*>(d_sideswipeLoad), reinterpret_cast<void**>(&o_sideswipeLoad)))
+        logf("Sideswipe retrigger delay: the platform didn't allow the hook (see platform.log), the game's own delay stays");
     static const uint8_t bp[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x50, 0x10, 0x48, 0x89, 0x48, 0x08, 0x55}; // break into pieces
-    if (g_loadedLooks && code_matches(0x36AC80, bp, sizeof bp))
-        ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
-                                   reinterpret_cast<void*>(d_breakPieces), reinterpret_cast<void**>(&o_breakPieces)) != nullptr;
-    else if (g_loadedLooks) logf("tree piece fallback: game code doesn't match, off");
+    if (g_loadedLooks && code_matches(0x36AC80, bp, sizeof bp)) {
+        if (!g_api->hook_function(g_mod, "CWorldCollObjMan::BreakIntoPieces", reinterpret_cast<void*>(g_base + 0x36AC80),
+                                  reinterpret_cast<void*>(d_breakPieces), reinterpret_cast<void**>(&o_breakPieces)))
+            logf("tree piece fallback: the platform didn't allow the hook (see platform.log), off");
+    } else if (g_loadedLooks) logf("tree piece fallback: game code doesn't match, off");
     // Own models for loose fences: an instruction hook, so platform 2.6.0 (API 7) or later. Not
     // part of `ok`: without it fences just keep the look of the definition they break as.
     static const uint8_t wm[] = {0x48, 0x8D, 0x4D, 0xC0, 0x48, 0x89, 0x4C, 0x24, 0x20};   // lea rcx,[rbp-40h]; mov [rsp+20h],rcx
@@ -3747,24 +3911,53 @@ DWORD WINAPI setup_thread(LPVOID) {
     static const uint8_t mu[] = {0x48, 0x8B, 0xC4, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55}; // CWorldCollObjMan update
     static const uint8_t so[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x88, 0x50, 0x10}; // SpawnObject
     // Logs, poles and debris clean-up all run from here, and each can be switched on and off
-    // in the game (Pause > Settings > MODS), so it's hooked whatever they're set to now.
-    if (code_matches(0x384C00, mu, sizeof mu) && code_matches(0x369690, so, sizeof so))
-        ok &= g_api->hook_function(g_mod, "CWorldCollObjMan::Update", reinterpret_cast<void*>(g_base + 0x384C00),
-                                   reinterpret_cast<void*>(d_mgrUpdate), reinterpret_cast<void**>(&o_mgrUpdate)) != nullptr;
-    else {
-        logf("world update: game code doesn't match, logs, poles and debris clean-up are off");
+    // in the game (Pause > Settings > MODS), so it's hooked whatever they're set to now. The
+    // solid pylons need it too: only it finds them (with the poles' scan, or its own while the
+    // poles are off), as it keeps the track presentation known. Not part of `ok`: another mod
+    // may hook it as well (the platform runs both), and if the platform doesn't allow it, only
+    // these go off, not the trees, fences and clutter (the break hooks then find the track
+    // presentation themselves, see find_presentation).
+    bool mgrHooked = false;
+    if (!code_matches(0x384C00, mu, sizeof mu) || !code_matches(0x369690, so, sizeof so))
+        logf("world update: game code doesn't match, logs, poles, solid pylons and debris clean-up are off");
+    else if (g_api->hook_function(g_mod, "CWorldCollObjMan::Update", reinterpret_cast<void*>(g_base + 0x384C00),
+                                  reinterpret_cast<void*>(d_mgrUpdate), reinterpret_cast<void**>(&o_mgrUpdate)))
+        mgrHooked = true;
+    else
+        logf("world update: the platform didn't allow the hook (see platform.log), logs, poles, solid pylons and debris clean-up are off");
+    if (!mgrHooked) {
         g_logs = g_poles = g_debrisCleanup = 0;
-        g_rowsOff = true;
+        g_solidModels[0] = 0;
+        g_markEnabled    = 0;   // F8 is read there too
+        g_rowsOff        = true;
+    }
+    // Solid pylons: another mod may add its own triangles here too (each detour calls on to the
+    // next). Not part of `ok`: without it the pylons just stay as the game has them. Hooked only
+    // with the world update, as nothing else finds them.
+    static const uint8_t gp[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x48, 0x89, 0x48, 0x08, 0x55};   // GetPolys
+    if (g_solidModels[0]) {
+        if (!code_matches(0x12CC730, gp, sizeof gp)) {
+            logf("solid pylons: game code doesn't match, off");
+            g_solidModels[0] = 0;
+        } else if (!g_api->hook_function(g_mod, "CollisionWorld::GetPolys", reinterpret_cast<void*>(g_base + 0x12CC730),
+                                         reinterpret_cast<void*>(d_getPolys), reinterpret_cast<void**>(&o_getPolys))) {
+            logf("solid pylons: the platform didn't allow the hook (see platform.log), off");
+            g_solidModels[0] = 0;
+        }
     }
     static const uint8_t nu[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x48, 0x20, 0x4C, 0x89, 0x40, 0x18}; // render node update
     if (g_logStretch && !g_rowsOff) {
-        if (*reinterpret_cast<uintptr_t*>(g_base + 0x2EB8590 + 0x338) == g_base + 0x132B390 && code_matches(0x13A41E0, nu, sizeof nu)) {
-            ok &= g_api->hook_function(g_mod, "CTrackPresentation::BindCollObjInstanceToModel", reinterpret_cast<void*>(g_base + 0x132B390),
-                                       reinterpret_cast<void*>(d_tpBind), reinterpret_cast<void**>(&o_tpBind)) != nullptr;
-            ok &= g_api->hook_function(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
-                                           reinterpret_cast<void*>(d_nodeUpdate), reinterpret_cast<void**>(&o_nodeUpdate)) != nullptr;
-        } else {
+        if (!slot_is(0x2EB8590 + 0x338, 0x132B390) || !code_matches(0x13A41E0, nu, sizeof nu)) {
             logf("log stretching: game code doesn't match, off");
+            g_logStretch = g_logProbe = 0;
+        } else if (!g_api->hook_function(g_mod, "CTrackPresentation::BindCollObjInstanceToModel", reinterpret_cast<void*>(g_base + 0x132B390),
+                                         reinterpret_cast<void*>(d_tpBind), reinterpret_cast<void**>(&o_tpBind)) ||
+                   !g_api->hook_function(g_mod, "Presentation11 render node update", reinterpret_cast<void*>(g_base + 0x13A41E0),
+                                         reinterpret_cast<void*>(d_nodeUpdate), reinterpret_cast<void**>(&o_nodeUpdate))) {
+            // If only the second is refused, the bind hook stays: on its own it only notes the
+            // presentation and where pieces are bound. o_nodeUpdate stays null, so nothing is
+            // stretched and a falling pole isn't drawn with its own model.
+            logf("log stretching: the platform didn't allow the hook (see platform.log), off");
             g_logStretch = g_logProbe = 0;
         }
     }
@@ -3776,30 +3969,68 @@ DWORD WINAPI setup_thread(LPVOID) {
                                reinterpret_cast<void*>(d_templateQuery), reinterpret_cast<void**>(&o_templateQuery)) != nullptr;
     if (!ok || !g_api->enable_hooks(g_mod, nullptr)) {
         logf("ERROR: hooking failed (see platform.log)");
-        return 0;
+        return;
     }
     logf("on: trees %s, logs %s, fences and railings %s, roadside clutter %s, telephone poles %s, solid pylons %s, debris clean-up %s%s",
          g_inject ? "yes" : "no", g_logs ? "yes" : "no", g_barriers ? "yes" : "no", g_clutter ? "yes" : "no", g_poles ? "yes" : "no",
          g_solidModels[0] && g_solidOn ? "yes" : "no", g_debrisCleanup ? "yes" : "no",
-         g_debug ? " (debug log on, F8 snapshot)" : "");
+         !g_debug ? "" : g_markEnabled ? " (debug log on, F8 snapshot)" : " (debug log on; F8 snapshot off without the world update)");
+}
+
+DWORD WINAPI setup_thread(LPVOID) {
+    setup();
+    close_game_exe();   // only setup's checks read it
+    return 0;
+}
+
+FH2ModInfo mod_info(int checkUpdates) {
+    FH2ModInfo info{};
+    info.size             = sizeof info;   // every platform from 2.0.0 takes it: register_mod only checks a minimum size
+    info.name             = "WreckingBall";
+    info.version          = WB_VERSION;
+    info.github_repo      = "Trinculo54/WreckingBall";
+    info.platform_version = FH2MOD_PLATFORM_VERSION;
+    info.description      = "Lets you drive through the scenery like the later Horizon games: trees snap and throw logs, fences and railings burst apart, roadside clutter goes flying and telephone poles fall over. Festival fences and the barriers in front of crowds stay solid.";
+    info.check_updates    = checkUpdates;
+    return info;
+}
+
+// A platform from before hooks (2.0 or 2.1, API 1 and 2), put back by another mod's zip. Only
+// API 1 here (register_mod, log, azimuth_dir): registering is what puts "Old FH2 Mod Platform:
+// reinstall WreckingBall" on the title screen, so the player learns what to do instead of the
+// mod just vanishing. The mod's own state is left alone: Azimuth 1.0.1 loads both platform
+// DLLs, and platform 2.8.0 can't see a copy older than 2.3.0 (it finds other copies by their
+// RestartHelper export), so neither stands down and a newer platform may have started the mod
+// in this game already.
+int start_on_old_platform(const FH2ModApi* api) {
+    static const char kOld[] = "needs FH2 Mod Platform 2.2.0 or newer, so it's off. An older platform from another mod's zip is "
+                               "running: extract WreckingBall's zip again to get the platform it comes with.";
+    const std::wstring dir = std::wstring(api->azimuth_dir) + L"\\fh2-mods";
+    const FH2ModInfo info  = mod_info(GetPrivateProfileIntW(L"WreckingBall", L"CheckUpdates", 1, (dir + L"\\WreckingBall.ini").c_str()));
+    FH2Mod* mod            = api->register_mod(&info);
+    if (!mod) return 1;
+    api->log(mod, kOld);
+    if (!g_mod) {   // no newer platform has started it: say so in WreckingBall.log as well
+        if (FILE* f = _wfopen((dir + L"\\WreckingBall.log").c_str(), L"w")) {
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            for (const char* line : {"WreckingBall " WB_VERSION, kOld})
+                fprintf(f, "%02d:%02d:%02d.%03d %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, line);
+            fclose(f);
+        }
+    }
     return 0;
 }
 
 } // namespace
 
 FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
-    if (api->api_version < 3) return 1;
+    if (!api) return 1;
+    if (api->api_version < 3) return start_on_old_platform(api);   // hooks came with platform 2.2.0 (API 3)
     g_api = api;
-    FH2ModInfo info{};
-    info.size             = sizeof info;
-    info.name             = "WreckingBall";
-    info.version          = WB_VERSION;
-    info.github_repo      = "Trinculo54/WreckingBall";
-    info.platform_version = FH2MOD_PLATFORM_VERSION;
-    info.description      = "Lets you drive through the scenery like the later Horizon games: trees snap and throw logs, fences and railings burst apart, roadside clutter goes flying and telephone poles fall over. Festival fences and the barriers in front of crowds stay solid.";
     g_dir = std::wstring(api->azimuth_dir) + L"\\fh2-mods";
     load_settings();
-    info.check_updates    = g_checkUpdates;
+    const FH2ModInfo info = mod_info(g_checkUpdates);
     g_mod                 = api->register_mod(&info);
     if (!g_mod) return 1;
     g_trunkPool = static_cast<TrunkNode*>(VirtualAlloc(nullptr, sizeof(TrunkNode) * TRUNK_POOL, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
