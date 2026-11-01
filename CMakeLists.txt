@@ -21,8 +21,8 @@ else()
     add_link_options(-static)
 endif()
 
-# The FH2 Mod Platform (git submodule): d3dcompiler_47.dll, shipped next
-# to azimuth.exe, and fh2mod.h.
+# The FH2 Mod Platform (git submodule): d3dcompiler_47.dll and DWrite.dll
+# (the same file), shipped next to azimuth.exe, and fh2mod.h.
 add_subdirectory(platform)
 configure_file(cmake/version.h.in ${CMAKE_BINARY_DIR}/generated/fh2_version.h)
 
