@@ -2624,7 +2624,8 @@ uint8_t* track_presentation(uint8_t* mgr) {
 // the presentation too) is off, so nothing would ever find the track presentation, and "is this
 // model loaded" would always say yes: the tree piece fallback would never swap in a tree that's
 // loaded here, and fences would keep their stand-in's look. So then the break hooks look for it
-// themselves, at most twice a second, which also catches a map change.
+// themselves, at most twice a second, which also catches a map change. (With the world update
+// hooked, it looks every 30 frames, poles on or off: scan_poles, or scan_without_poles.)
 std::atomic<ULONGLONG> g_presNext{0};
 void find_presentation(uint8_t* mgr) {
     if (!g_rowsOff || !mgr) return;
@@ -2753,6 +2754,16 @@ void build_solids(uint8_t* b, size_t n) {
     g_nSolids.store((int)out.size());
     logf("solid pylons: %zu found (models %s), %.2f m wide, %.1f m tall", out.size(), g_solidModels, g_solidHalf * 2, g_solidHeight);
 }
+// The placed models the pylons were last built from. They're built again only when those change
+// (a map change), whichever of the pole scan and the poles-off scan (scan_without_poles) sees it
+// first. Both run in the world update, so these are only touched on its thread.
+uint8_t* g_solidScanBase = nullptr;
+size_t g_solidScanCount = 0;
+void solids_for(uint8_t* b, size_t n) {
+    if (b == g_solidScanBase && n == g_solidScanCount) return;
+    build_solids(b, n);
+    g_solidScanBase = b; g_solidScanCount = n;
+}
 
 // learn how the game stores a triangle's normal, from its own triangles
 void learn_tri_convention(uint8_t** tris, uint8_t** verts, int n) {
@@ -2841,6 +2852,13 @@ void forget_poles() {
     g_poleScanBase  = nullptr;
     g_poleScanCount = 0;
 }
+// Which map n placed models are: the breakable definitions say (Storm Island numbers them
+// differently), or, before any has been seen, their number (the mainland has about 88,000 placed
+// models, the island about 14,000).
+bool island_map(size_t n) {
+    const DefMap* dm = g_lastDefMap.load(std::memory_order_acquire);
+    return dm ? dm->moved : n < 40000;
+}
 void scan_poles(uint8_t* mgr) {
     uint8_t* tp = track_presentation(mgr);
     if (!tp) return;
@@ -2856,14 +2874,10 @@ void scan_poles(uint8_t* mgr) {
     if (b == g_poleScanBase && n == g_poleScanCount) return;
     if (!readable(b, 0x70) || !readable(e - 0x70, 0x70)) return;   // still being built
     g_poleScanBase = b; g_poleScanCount = n;
-    // Which map: the breakable definitions say (Storm Island numbers them differently), or,
-    // before any has been seen, its size (the mainland has about 88,000 placed models, the
-    // island about 14,000).
-    const DefMap* dm = g_lastDefMap.load(std::memory_order_acquire);
-    const bool island = dm ? dm->moved : n < 40000;
+    const bool island = island_map(n);
     if (island != g_islandMap) logf("poles: on %s", island ? "Storm Island" : "the mainland");
     g_islandMap = island;
-    if (g_solidModels[0] && !island) build_solids(b, n);   // the concrete pylons are only on the mainland
+    if (g_solidModels[0] && !island) solids_for(b, n);   // the concrete pylons are only on the mainland
     std::vector<Pole> found;
     int perModel = 0, tooBig = 0;
     int scaleHist[8] = {};   // 0.25-wide buckets from 0.5
@@ -3032,6 +3046,25 @@ void update_poles(uint8_t* mgr) {
         if (cx * cx + cz * cz < 1.15f * 1.15f) break_pole(mgr, pl, vel);
     }
 }
+// With the poles off (Poles=0, or switched off on the Mods page), the pole scan doesn't run, and it
+// was what kept the track presentation known and built the solid pylons. Unless the log stretching
+// bind hook happened to see it, "is this model loaded" then always said yes (the tree piece fallback
+// never swapped, logs could pick a look that isn't loaded, fences kept their stand-in's look), and
+// the pylons stayed as the game has them although the "on:" line said they were solid. So the world
+// update does both itself while the poles are off, on the same thread and as often as the pole scan
+// (which takes over when they're switched on). Their collision isn't touched: they stay solid.
+bool g_trackScanOff = false;   // it kept crashing
+void scan_without_poles(uint8_t* mgr) {
+    uint8_t* tp = track_presentation(mgr);
+    if (!tp || !g_solidModels[0] || !g_solidOn) return;
+    const uint64_t t = reinterpret_cast<uint64_t>(tp);
+    uint8_t* b = reinterpret_cast<uint8_t*>(srd<uint64_t>(t + 0xFB78));
+    uint8_t* e = reinterpret_cast<uint8_t*>(srd<uint64_t>(t + 0xFB80));
+    if (!b || e <= b) return;
+    const size_t n = (size_t)(e - b) / 0x70;
+    if (!readable(b, 0x70) || !readable(e - 0x70, 0x70)) return;   // still being built
+    if (!island_map(n)) solids_for(b, n);   // the concrete pylons are only on the mainland
+}
 
 // ---- debris clean-up -------------------------------------------------------------
 // A loose piece (state 5) normally stays until the player is ~150 m away from where it broke
@@ -3162,6 +3195,17 @@ void d_mgrUpdate(uint8_t* mgr, float a, float b) {
                 pause    = 120;
                 if (++crashes >= 20) { logf("poles crashed %d times; turned off", crashes); g_poles = 0; }
                 else logf("poles crashed; trying again shortly");
+            }
+        }
+    } else if (!g_trackScanOff) {
+        // the poles are off: still look for the track presentation and the solid pylons
+        static int frame = 0, crashes = 0;
+        if ((frame++ % 30) == 0) {
+            __try {
+                scan_without_poles(mgr);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                if (++crashes >= 20) { logf("track scan with the poles off crashed %d times; turned off", crashes); g_trackScanOff = true; }
+                else logf("track scan with the poles off crashed; trying again shortly");
             }
         }
     }
@@ -3868,7 +3912,8 @@ void setup() {
     static const uint8_t so[] = {0x48, 0x8B, 0xC4, 0x44, 0x89, 0x40, 0x18, 0x88, 0x50, 0x10}; // SpawnObject
     // Logs, poles and debris clean-up all run from here, and each can be switched on and off
     // in the game (Pause > Settings > MODS), so it's hooked whatever they're set to now. The
-    // solid pylons need it too: only the pole scan finds them. Not part of `ok`: another mod
+    // solid pylons need it too: only it finds them (with the poles' scan, or its own while the
+    // poles are off), as it keeps the track presentation known. Not part of `ok`: another mod
     // may hook it as well (the platform runs both), and if the platform doesn't allow it, only
     // these go off, not the trees, fences and clutter (the break hooks then find the track
     // presentation themselves, see find_presentation).
