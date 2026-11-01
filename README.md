@@ -6,7 +6,7 @@ It works on the mainland and on Storm Island. It's a single DLL. The game's file
 
 ## Features
 
-**Trees and bushes.** Every tree and bush in the open world breaks when you hit it, using the game's own smashable tree physics, so it sounds and looks like the handful of breakable trees the game already had. Bigger trees slow you down more than small ones, and the biggest count as log piles, so they give you Lumberjack skill points. They also throw wood splinters and dust on top of the usual burst of leaves. Bushes, hedges and crops flatten like the game's own breakable bushes instead: a small puff of leaves, with no log and only a light slowdown.
+**Trees and bushes.** Every tree and bush in the open world breaks when you hit it, using the game's own smashable tree physics, so it sounds and looks like the handful of breakable trees the game already had. Bigger trees slow you down more than small ones, and the biggest count as log piles, so they give you Lumberjack skill points. They also throw wood splinters and dust on top of the usual burst of leaves. Bushes, hedges, crops and vineyard rows flatten like the game's own breakable bushes instead: a small puff of leaves, with no log and only a light slowdown.
 
 **Logs.** Every broken tree throws a log, sized to the tree it came from. It pops up just ahead of your car, leaning away from you, for the nose to knock over, and its collision is the size of the log you see, so it rolls and settles where it looks like it should.
 
@@ -65,7 +65,7 @@ The main switches are in the game, under Pause > Settings > MODS (see above). Ev
 | `SpeedLossMax` | `0.45` | The most a single tree can take. |
 | `LumberjackMinSize` | `1.6` | Trees at least this big (1 = a normal tree) count as log piles for Lumberjack and throw splinters. |
 | `BigTreeEffects` | `Break_WoodDust,Break_Wood` | Extra break effects for big trees, from the game's own list. Empty = none. |
-| `BushModels` | `Bush_,Crop_` | Models whose name contains one of these flatten like the game's own bushes: a small puff of leaves, no log, no Lumberjack. Empty = they break like trees, as in 1.1. |
+| `BushModels` | `Bush_,Crop_,VINEYARD_` | Models whose name contains one of these flatten like the game's own bushes: a small puff of leaves, no log, no Lumberjack. Empty = they break like trees, as in 1.1. |
 | `BushSpeedLoss` | `0.04` | Share of your speed a bush takes. |
 | `SkipModels` | (empty) | Models whose name contains one of these stay solid. With `Debug=1` the log lists every tree and bush model as it loads, with how it was sorted. |
 | `Logs` | `1` | `0` turns the logs off. |
@@ -93,7 +93,7 @@ The main switches are in the game, under Pause > Settings > MODS (see above). Ev
 | `CheckUpdates` | `1` | `0` stops the update check. |
 | `Debug` | `0` | `1` writes a detailed log. F8 then adds a snapshot of the collision around the car, and the game's breakable definitions go to `WreckingBall-defs.txt`. Turn it on when reporting a problem. |
 
-The Wreckage, Lumberjack and Sideswipe skills award at most once every 1, 2.5 and 5 seconds respectively (`WreckageRetrigger`, `LumberjackRetrigger`, `SideswipeRetrigger`), so plowing through a forest doesn't flood the skill chain. These change the skills for everything you smash, not just trees, and `-1` leaves the game's own values. More settings, mostly the numbers behind the tree sizes, log throwing and pole physics, are read from the ini too. They're listed with their defaults at the top of `load_settings()` in [`src/wreckingball.cpp`](src/wreckingball.cpp).
+The Wreckage, Lumberjack and Sideswipe skills award at most once every 1, 2.5 and 5 seconds respectively (`WreckageRetrigger`, `LumberjackRetrigger`, `SideswipeRetrigger`), so ploughing through a forest doesn't flood the skill chain. These change the skills for everything you smash, not just trees, and `-1` leaves the game's own values. More settings, mostly the numbers behind the tree sizes, log throwing and pole physics, are read from the ini too. They're listed with their defaults at the top of `load_settings()` in [`src/wreckingball.cpp`](src/wreckingball.cpp).
 
 ## Uninstall
 
@@ -147,7 +147,7 @@ The mod is built with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releas
 
 ## License
 
-Released under the [GNU General Public License v3.0](LICENSE). The FH2 Mod Platform includes [MinHook](https://github.com/TsudaKageyu/minhook), whose license ships in the zip as `LICENSE-MinHook.txt`.
+Released under the [GNU General Public License v3.0](LICENSE). The FH2 Mod Platform includes [MinHook](https://github.com/TsudaKageyu/minhook), whose licence ships in the zip as `LICENSE-MinHook.txt`.
 
 ## Disclaimer
 
