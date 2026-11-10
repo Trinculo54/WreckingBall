@@ -1371,7 +1371,11 @@ void d_sideswipeLoad(uint8_t* skill, void* node) { o_sideswipeLoad(skill, node);
 // car+0x4D08 is its kind (ForzaCar's getter 0x140F62280): 0 is the player's own car.
 float g_speedLoss = 0.12f, g_speedLossExponent = 1.5f, g_speedLossMax = 0.45f;
 std::atomic<uint8_t*> g_playerCar{nullptr}; // for poles; it may be gone by then (see break_pole)
+// Whether the car apply_speed_loss last looked at, on this thread, is the player's own: a log from a
+// Drivatar's or traffic car's smash is placed by that car (spawn_log), not by the player's.
+thread_local bool t_hitByPlayer = false;
 void apply_speed_loss(void* contact, float size, float* lossOut, float* beforeMph, float* afterMph, float* velOut, float fixedLoss = -1) {
+    t_hitByPlayer = false;
     __try {
         uint8_t* other = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(contact) + 8);
         if (!other) return;
@@ -1386,7 +1390,10 @@ void apply_speed_loss(void* contact, float size, float* lossOut, float* beforeMp
         if (!dyn) return;
         void** dvt = *reinterpret_cast<void***>(dyn);
         if (reinterpret_cast<uintptr_t>(dvt[0x290 / 8]) != g_base + 0x12E3CF0) return; // not CCarDynamics::SetVelocity
-        if (*reinterpret_cast<int32_t*>(car + 0x4D08) == 0) g_playerCar.store(car);
+        if (*reinterpret_cast<int32_t*>(car + 0x4D08) == 0) {
+            g_playerCar.store(car);
+            t_hitByPlayer = true;
+        }
         using GetVelFn = float* (*)(void*, float*);
         using SetVelFn = void (*)(void*, const float*);
         alignas(16) float v[4];
@@ -1538,7 +1545,8 @@ std::atomic<int> g_logNext{0}, g_logsSpawned{0};
 
 struct PendingLog { uint8_t* mgr; float x, y, z, vx, vy, vz; uint8_t key[16]; uint32_t b0, b4; LogCandidate c; int n; float length;
                     bool pole; float thick, tilt, spin, speedK, up, height;
-                    int ownModel; float r0[9], scale; };   // a pole's own model, rotation rows (unit) and scale; ownModel -1: none
+                    int ownModel; float r0[9], scale;    // a pole's own model, rotation rows (unit) and scale; ownModel -1: none
+                    bool byPlayer; };                    // the player's own car broke it (else a Drivatar's or traffic)
 int g_poleOwnModel = 1;   // PoleOwnModel: a falling pole is drawn with the pole's own model
 // PoleBody: the breakable piece that is a pole drawn with its own model's physics body. The large
 // triple street light's main pole (91:0, ~8.7 m: bounding radius 4.36) is as long as a telephone
@@ -1610,6 +1618,7 @@ void queue_log(uint8_t* obj, float x, float y, float z, const float* carVel, flo
     p.pole = false; p.thick = g_logThickness * std::min(1.0f, std::max(0.35f, size));   // smaller trees, thinner logs
     p.length = std::max(p.length, 0.9f);
     p.tilt = g_logTilt; p.spin = g_logSpin; p.speedK = g_logSpeed; p.up = g_logUp; p.height = g_logHeight;
+    p.byPlayer = t_hitByPlayer;   // set by apply_speed_loss, just before, on this thread
     std::lock_guard<std::mutex> l(g_pendLock);
     if (g_nPend < 16) g_pend[g_nPend++] = p;
 }
@@ -1908,7 +1917,11 @@ void spawn_log(const PendingLog& p) {
         // standing on its base: the car's centre is about 0.45 m above the ground; the centre of
         // the body goes half the log up from there (at least half the body's own shape, about
         // 3.2 m long, so it never starts in the ground), plus LogCarHeight of clearance
-        const float* car = reinterpret_cast<const float*>(mgr + 0x4F0);
+        // The car is the one that broke the tree. mgr+0x4F0 is only the player's; any other car's is
+        // estimated: as it broke the tree its front was at the tree, so its centre was about 2.3 m back
+        // along its way and 0.45 m off the ground. (Using the player's put a Drivatar's log on the player.)
+        float other[3] = {p.x - fx * 2.3f, p.y + 0.45f, p.z - fz * 2.3f};
+        const float* car = p.byPlayer ? reinterpret_cast<const float*>(mgr + 0x4F0) : other;
         const float half = std::max(p.length * 0.5f, 1.6f);
         pos[0] = car[0] + fx * g_logCarAhead + a[0] * half;
         pos[1] = car[1] - 0.45f + g_logCarHeight + a[1] * half;
